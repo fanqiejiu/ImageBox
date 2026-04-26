@@ -1998,7 +1998,7 @@ private fun SettingsScreen(
     var creditMenuOpen by rememberSaveable { mutableStateOf(false) }
     var saveMenuOpen by rememberSaveable { mutableStateOf(false) }
     var aboutMenuOpen by rememberSaveable { mutableStateOf(false) }
-    var apiSiteMenuOpen by rememberSaveable { mutableStateOf(false) }
+    var showApiSitePage by rememberSaveable { mutableStateOf(false) }
 
     val context = LocalContext.current
     val currentVersion = remember {
@@ -2037,6 +2037,43 @@ private fun SettingsScreen(
         else -> if (platformKeySet) "余额 Key 已配置" else "余额 Key 未配置"
     }
 
+    if (showApiSitePage) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { showApiSitePage = false }) {
+                    Text("← 返回")
+                }
+                Spacer(Modifier.weight(1f))
+                Text("API 网站", fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(64.dp))
+            }
+            LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(API_PLATFORMS) { platform ->
+                    ElevatedCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { openUrl(context, platform.websiteUrl) },
+                    ) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(platform.name, fontWeight = FontWeight.Bold)
+                            Text(platform.websiteUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                platform.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    } else {
     LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { SectionTitle("直连平台设置", generationStatus) }
         item {
@@ -2287,40 +2324,20 @@ private fun SettingsScreen(
             }
         }
         item {
-            ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text("API 网站", fontWeight = FontWeight.Bold)
-                        TextButton(onClick = { apiSiteMenuOpen = !apiSiteMenuOpen }) {
-                            Text(if (apiSiteMenuOpen) "收起" else "展开")
-                        }
-                    }
-                    if (apiSiteMenuOpen) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            API_PLATFORMS.forEach { platform ->
-                                ElevatedCard(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { openUrl(context, platform.websiteUrl) },
-                                ) {
-                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Text(platform.name, fontWeight = FontWeight.Bold)
-                                        Text(platform.websiteUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text(
-                                            platform.description,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showApiSitePage = true },
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("API 网站", fontWeight = FontWeight.Bold)
+                    Text(">", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -2485,6 +2502,7 @@ private fun SettingsScreen(
                 }
             }
         }
+    }
     }
 
     if (showUpdateDialog) {
