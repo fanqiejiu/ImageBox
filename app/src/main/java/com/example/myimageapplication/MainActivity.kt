@@ -172,7 +172,7 @@ private fun LaunchSplashScreen() {
             Spacer(Modifier.height(18.dp))
             Text("Image box", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
-            Text("v0.2.0beta", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+            Text("v0.2.1beta", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
@@ -265,6 +265,7 @@ private data class ImageItem(
     val info: String,
     val createdAt: String,
     val taskId: String,
+    val savedImageUri: String = "",
 )
 
 private data class QueueTask(
@@ -476,6 +477,19 @@ private fun ImagePlatformApp(
                 url = absoluteUrl("", item.displayUrl),
                 requestedName = item.filename.ifBlank { "generated_${System.currentTimeMillis()}.png" },
             )
+            if (saved != null) {
+                val savedUri = saved.toString()
+                val updatedHistory = serverState.history.map { historyItem ->
+                    when {
+                        item.taskId.isNotBlank() && historyItem.taskId == item.taskId -> historyItem.copy(savedImageUri = savedUri)
+                        item.displayUrl.isNotBlank() && historyItem.displayUrl == item.displayUrl -> historyItem.copy(savedImageUri = savedUri)
+                        else -> historyItem
+                    }
+                }
+                val updatedState = serverState.copy(history = updatedHistory)
+                serverState = updatedState
+                persistDirectHistory(prefs, updatedState.history)
+            }
             show(
                 when {
                     saved != null && automatic -> "已自动保存到手机相册"
@@ -1567,6 +1581,47 @@ private fun HistoryScreen(
     }
 }
 
+private sealed interface HistoryThumbnailState {
+    data object Loading : HistoryThumbnailState
+    data class Loaded(val bitmap: Bitmap) : HistoryThumbnailState
+    data object Unavailable : HistoryThumbnailState
+}
+
+@Composable
+private fun HistoryThumbnail(item: ImageItem, baseUrl: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val remoteUrl = absoluteUrl(baseUrl, item.displayUrl)
+    val thumbnailState by produceState<HistoryThumbnailState>(
+        initialValue = HistoryThumbnailState.Loading,
+        item.savedImageUri,
+        remoteUrl,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val localBitmap = item.savedImageUri.takeIf { it.isNotBlank() }?.let { loadBitmap(context, it) }
+            when {
+                localBitmap != null -> HistoryThumbnailState.Loaded(localBitmap)
+                remoteUrl.isBlank() -> HistoryThumbnailState.Unavailable
+                else -> loadBitmap(remoteUrl)?.let { HistoryThumbnailState.Loaded(it) } ?: HistoryThumbnailState.Unavailable
+            }
+        }
+    }
+    when (val state = thumbnailState) {
+        HistoryThumbnailState.Loading -> Box(
+            modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("加载中", style = MaterialTheme.typography.labelSmall)
+        }
+        is HistoryThumbnailState.Loaded -> Image(
+            bitmap = state.bitmap.asImageBitmap(),
+            contentDescription = null,
+            modifier = modifier,
+            contentScale = ContentScale.Crop,
+        )
+        HistoryThumbnailState.Unavailable -> Unit
+    }
+}
+
 @Composable
 private fun HistoryCard(baseUrl: String, item: ImageItem, onPick: (ImageItem) -> Unit) {
     ElevatedCard(
@@ -1575,12 +1630,16 @@ private fun HistoryCard(baseUrl: String, item: ImageItem, onPick: (ImageItem) ->
             .clickable { onPick(item) },
     ) {
         Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            RemoteImage(
-                url = absoluteUrl(baseUrl, item.displayUrl),
-                modifier = Modifier
-                    .size(92.dp)
-                    .clip(RoundedCornerShape(10.dp)),
-            )
+            val hasThumbnailSource = item.savedImageUri.isNotBlank() || item.displayUrl.isNotBlank()
+            if (hasThumbnailSource) {
+                HistoryThumbnail(
+                    item = item,
+                    baseUrl = baseUrl,
+                    modifier = Modifier
+                        .size(92.dp)
+                        .clip(RoundedCornerShape(10.dp)),
+                )
+            }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(item.filename.ifBlank { item.taskId.ifBlank { "保存图片" } }, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(item.modelName.ifBlank { item.model }, style = MaterialTheme.typography.bodySmall)
@@ -1833,6 +1892,7 @@ private fun readDirectHistory(prefs: SharedPreferences): List<ImageItem> {
                         info = json.optString("info"),
                         createdAt = json.optString("created_at"),
                         taskId = json.optString("task_id"),
+                        savedImageUri = json.optString("saved_image_uri"),
                     )
                 )
             }
@@ -1853,6 +1913,7 @@ private fun persistDirectHistory(prefs: SharedPreferences, history: List<ImageIt
                 .put("info", item.info)
                 .put("created_at", item.createdAt)
                 .put("task_id", item.taskId)
+                .put("saved_image_uri", item.savedImageUri)
         )
     }
     prefs.edit().putString("direct_history", array.toString()).apply()
@@ -2880,6 +2941,15 @@ private fun loadBitmap(url: String): Bitmap? = try {
         connection.connectTimeout = 12000
         connection.readTimeout = 20000
         connection.inputStream.use { BitmapFactory.decodeStream(it) }
+    }
+} catch (_: Exception) {
+    null
+}
+
+private fun loadBitmap(context: Context, source: String): Bitmap? = try {
+    when {
+        source.startsWith("content://") -> context.contentResolver.openInputStream(Uri.parse(source))?.use { BitmapFactory.decodeStream(it) }
+        else -> loadBitmap(source)
     }
 } catch (_: Exception) {
     null
