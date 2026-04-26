@@ -35,8 +35,6 @@ AI 图像生成 Android 客户端，基于 Jetpack Compose 与 Material3 构建�
 ./gradlew :app:assembleDebug
 ```
 
-APK 输出路径：`app/build/outputs/apk/debug/app-debug.apk`
-
 ## 结构
 
 ```
