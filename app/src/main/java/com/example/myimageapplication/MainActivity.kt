@@ -2836,7 +2836,7 @@ private fun sanitizeImageFileName(value: String): String {
     return if (cleaned.contains('.')) cleaned else "$cleaned.png"
 }
 
-private const val GITHUB_OWNER = "YOUR_GITHUB_USERNAME"
+private const val GITHUB_OWNER = "fanqiejiu"
 private const val GITHUB_REPO = "ImageBox"
 
 private fun updateStatusText(status: String, latest: String): String = when (status) {
