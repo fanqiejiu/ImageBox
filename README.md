@@ -13,7 +13,6 @@ AI 图像生成 Android 客户端，基于 Jetpack Compose 与 Material3 构建�
 - **历史记录** — 本地保存生成历史，支持浏览和重新查看
 - **保存到相册** — 图片可手动或自动保存到系统相册（Pictures/Image box）
 - **深色模式** — 支持浅色/深色主题切换
-- **更新检测** — 进入设置页自动检测 GitHub Release 更新
 
 ## 默认接口
 
