@@ -1980,8 +1980,8 @@ private fun SettingsScreen(
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) {
-        if (updateStatus == "idle") {
+    fun triggerUpdateCheck() {
+        scope.launch {
             updateStatus = "checking"
             try {
                 val (status, ver, url) = withContext(Dispatchers.IO) { checkGitHubUpdate(currentVersion) }
@@ -1992,6 +1992,12 @@ private fun SettingsScreen(
             } catch (_: Exception) {
                 updateStatus = "error"
             }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (updateStatus == "idle") {
+            triggerUpdateCheck()
         }
     }
 
@@ -2368,7 +2374,7 @@ private fun SettingsScreen(
                                             "checking" -> "检查中…"
                                             "upToDate" -> "已是最新版本"
                                             "available" -> "发现新版本 v$latestVersion"
-                                            "error" -> "暂不可用，请检查网络"
+                                            "error" -> "检查失败，请重试"
                                             else -> "等待检测"
                                         },
                                         style = MaterialTheme.typography.bodySmall,
@@ -2380,13 +2386,34 @@ private fun SettingsScreen(
                                     )
                                 }
                             }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("项目地址", fontWeight = FontWeight.Bold)
+                                    Text(
+                                        "github.com/$GITHUB_OWNER/$GITHUB_REPO",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.clickable {
+                                            openUrl(context, "https://github.com/$GITHUB_OWNER/$GITHUB_REPO")
+                                        },
+                                    )
+                                }
+                            }
                             if (updateStatus == "available") {
                                 Button(
-                                    onClick = {
-                                        showUpdateDialog = true
-                                    },
+                                    onClick = { showUpdateDialog = true },
                                     modifier = Modifier.fillMaxWidth(),
                                 ) { Text("前往 GitHub 下载") }
+                            }
+                            if (updateStatus == "error" || updateStatus == "upToDate") {
+                                OutlinedButton(
+                                    onClick = { triggerUpdateCheck() },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("重新检查更新") }
                             }
                         }
                     }
@@ -2848,16 +2875,17 @@ private fun updateStatusText(status: String, latest: String): String = when (sta
 }
 
 private fun checkGitHubUpdate(currentVersion: String): Triple<String, String, String> {
-    val url = URL("https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest")
+    val url = URL("https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases")
     val connection = url.openConnection() as HttpURLConnection
     connection.setRequestProperty("Accept", "application/vnd.github+json")
     connection.connectTimeout = 8000
     connection.readTimeout = 8000
     try {
         val body = connection.inputStream.bufferedReader().readText()
-        val json = JSONObject(body)
-        val tagName = json.optString("tag_name", "").trimStart('v')
-        val htmlUrl = json.optString("html_url", "")
+        val array = JSONArray(body)
+        val latest = array.optJSONObject(0) ?: return Triple("error", "", "")
+        val tagName = latest.optString("tag_name", "").trimStart('v')
+        val htmlUrl = latest.optString("html_url", "")
         if (tagName.isBlank()) return Triple("error", "", "")
         return if (tagName != currentVersion.trimStart('v')) {
             Triple("available", tagName, htmlUrl)
