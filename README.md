@@ -88,11 +88,6 @@ app/src/main/java/com/example/myimageapplication/
     Theme.kt             # Material 3 主题配置
     Type.kt              # 字体排版
 ```
-
-## 说明
-
-当前项目以单文件 Compose 结构为主，便于快速迭代和直接定制交互逻辑。后续如果功能继续扩展，可再逐步拆分页面、状态与数据层。
-
 ## License
 
 MIT License
