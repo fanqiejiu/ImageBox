@@ -24,6 +24,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -127,10 +129,15 @@ class MainActivity : ComponentActivity() {
                 prefs.edit().putBoolean("dark_mode", enabled).apply()
             }
 
+            val currentVersion = remember {
+                try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" }
+                catch (_: Exception) { "" }
+            }
             MyImageApplicationTheme(darkTheme = darkMode, dynamicColor = false) {
                 ImagePlatformRoot(
                     darkMode = darkMode,
                     onDarkModeChange = ::changeDarkMode,
+                    currentVersion = currentVersion,
                 )
             }
         }
@@ -141,6 +148,7 @@ class MainActivity : ComponentActivity() {
 private fun ImagePlatformRoot(
     darkMode: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
+    currentVersion: String,
 ) {
     var showSplash by rememberSaveable { mutableStateOf(true) }
 
@@ -150,17 +158,18 @@ private fun ImagePlatformRoot(
     }
 
     if (showSplash) {
-        LaunchSplashScreen()
+        LaunchSplashScreen(currentVersion)
     } else {
         ImagePlatformApp(
             darkMode = darkMode,
             onDarkModeChange = onDarkModeChange,
+            currentVersion = currentVersion,
         )
     }
 }
 
 @Composable
-private fun LaunchSplashScreen() {
+private fun LaunchSplashScreen(currentVersion: String) {
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background,
@@ -176,7 +185,7 @@ private fun LaunchSplashScreen() {
             Spacer(Modifier.height(18.dp))
             Text("Image box", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
-            Text("v0.2.5beta", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+            Text("v$currentVersion", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
@@ -319,6 +328,7 @@ private data class ArchiveState(
 )
 
 private data class LocalImage(
+    val id: String = UUID.randomUUID().toString(),
     val name: String,
     val dataUrl: String,
 )
@@ -351,6 +361,8 @@ private const val DEFAULT_CUSTOM_PROVIDER_ID = "custom-default"
 private const val DEFAULT_LLM_ROLE_PROMPT = "你是商业图像生成提示词优化助手。只输出优化后的提示词，不要解释，不要加标题。保留用户核心意图，补充主体、构图、光线、材质、风格、质量和画面完整性，适合图像生成模型。"
 private const val PROMPT_TEMPLATES_PREF = "prompt_templates"
 private const val RECENT_PROMPT_TEMPLATES_PREF = "recent_prompt_templates"
+private const val UPDATE_LAST_CHECK_MS_PREF = "update_last_check_ms"
+private const val UPDATE_IGNORED_VERSION_PREF = "update_ignored_version"
 
 private data class ApiPlatformInfo(
     val id: String,
@@ -437,6 +449,7 @@ private val DIRECT_MODELS = listOf(
 private fun ImagePlatformApp(
     darkMode: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
+    currentVersion: String,
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("image-platform", Context.MODE_PRIVATE) }
@@ -478,11 +491,25 @@ private fun ImagePlatformApp(
     var historySeenHydrated by remember { mutableStateOf(false) }
     var seenImageKeys by remember { mutableStateOf(setOf<String>()) }
     var directJobs by remember { mutableStateOf(emptyList<DirectJob>()) }
+    var updateStatus by rememberSaveable { mutableStateOf("idle") }
+    var latestVersion by rememberSaveable { mutableStateOf("") }
+    var releaseUrl by rememberSaveable { mutableStateOf("") }
+    var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
 
     fun directClient() = DirectApiClient.fromPrefs(prefs)
 
     fun show(message: String) {
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    fun buildResultFileName(modelName: String, taskId: String = "", extension: String = "png"): String {
+        val safeModel = modelName.ifBlank { "ImageBox" }
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .trim('_')
+            .ifBlank { "ImageBox" }
+        val time = nowText("yyyyMMdd_HHmmss")
+        val suffix = taskId.take(6).ifBlank { "result" }
+        return "${safeModel}_${time}_$suffix.$extension"
     }
 
     fun markTemplateUsed(template: PromptTemplate) {
@@ -563,6 +590,33 @@ private fun ImagePlatformApp(
         newTemplateMenuOpen = false
     }
 
+    fun triggerUpdateCheck(force: Boolean = false, fromStartup: Boolean = false) {
+        scope.launch {
+            val ignoredVersion = prefs.getString(UPDATE_IGNORED_VERSION_PREF, "").orEmpty()
+            val lastCheckMs = prefs.getLong(UPDATE_LAST_CHECK_MS_PREF, 0L)
+            val now = System.currentTimeMillis()
+            if (!force && fromStartup && now - lastCheckMs < 24L * 60L * 60L * 1000L) return@launch
+            updateStatus = "checking"
+            try {
+                val (status, ver, url) = withContext(Dispatchers.IO) { checkGitHubUpdate(currentVersion) }
+                prefs.edit().putLong(UPDATE_LAST_CHECK_MS_PREF, now).apply()
+                updateStatus = status
+                latestVersion = ver
+                releaseUrl = url
+                if (status == "available") {
+                    if (!fromStartup || ignoredVersion != ver) {
+                        showUpdateDialog = true
+                    }
+                } else if (status == "upToDate" && force) {
+                    show("已检查更新，当前已是最新版本")
+                }
+            } catch (_: Exception) {
+                updateStatus = "error"
+                if (force) show("检查更新失败")
+            }
+        }
+    }
+
     val albumPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         albumPermissionGranted = granted
         if (granted && enableAlbumAfterPermissionRequest) {
@@ -612,7 +666,7 @@ private fun ImagePlatformApp(
             val saved = saveRemoteImageToGallery(
                 context = context,
                 url = absoluteUrl("", item.displayUrl),
-                requestedName = item.filename.ifBlank { "generated_${System.currentTimeMillis()}.png" },
+                requestedName = buildResultFileName(item.modelName.ifBlank { item.model }, item.taskId),
             )
             if (saved != null) {
                 val savedUri = saved.toString()
@@ -791,6 +845,11 @@ private fun ImagePlatformApp(
         refreshDirectState(showLoading = true)
     }
 
+    LaunchedEffect(Unit) {
+        delay(1500)
+        triggerUpdateCheck(fromStartup = true)
+    }
+
     LaunchedEffect(saveToAlbum) {
         prefs.edit().putBoolean("save_to_album", saveToAlbum).apply()
     }
@@ -822,7 +881,7 @@ private fun ImagePlatformApp(
                 directJobs = directJobs.filterNot { it.taskId == job.taskId }
                 val item = ImageItem(
                     displayUrl = result.finalUrl,
-                    filename = sanitizeImageFileName(result.finalUrl.substringAfterLast('/').substringBefore('?').ifBlank { "${job.taskId}.png" }),
+                    filename = buildResultFileName(job.modelName, job.taskId),
                     prompt = job.prompt,
                     model = job.model,
                     modelName = job.modelName,
@@ -907,7 +966,13 @@ private fun ImagePlatformApp(
         ) {
             when (currentTab) {
                 AppTab.Create -> CreateScreen(
-                    state = serverState,
+                    creditsBalance = serverState.credits.balance,
+                    totalTasks = serverState.pending.size + serverState.active.size,
+                    totalGenerated = serverState.totalCount,
+                    canShowCredits = useCreditEstimate,
+                    aspectRatios = serverState.aspectRatios,
+                    imageSizes = serverState.imageSizes,
+                    generationKeyConfigured = serverState.settings.apiKeySet,
                     models = activeModels,
                     modelStatus = serverState.modelStatus,
                     selectedModel = model,
@@ -1032,6 +1097,19 @@ private fun ImagePlatformApp(
                     albumPermissionGranted = albumPermissionGranted,
                     albumPermissionRequired = needsAlbumWritePermission(),
                     onRequestAlbumPermission = { requestAlbumPermission(enableAfterGrant = false) },
+                    currentVersion = currentVersion,
+                    updateStatus = updateStatus,
+                    latestVersion = latestVersion,
+                    releaseUrl = releaseUrl,
+                    showUpdateDialog = showUpdateDialog,
+                    onShowUpdateDialogChange = { showUpdateDialog = it },
+                    onTriggerUpdateCheck = { force, fromStartup -> triggerUpdateCheck(force, fromStartup) },
+                    onIgnoreCurrentVersion = {
+                        if (latestVersion.isNotBlank()) {
+                            prefs.edit().putString(UPDATE_IGNORED_VERSION_PREF, latestVersion).apply()
+                        }
+                        showUpdateDialog = false
+                    },
                     onRefreshCredits = {
                         refreshDirectState(showLoading = true)
                     },
@@ -1142,8 +1220,8 @@ private fun PlatformBottomBar(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 8.dp,
-        shadowElevation = 12.dp,
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp,
     ) {
         Column(
             modifier = Modifier
@@ -1273,7 +1351,13 @@ private fun BottomTabItem(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CreateScreen(
-    state: ServerState,
+    creditsBalance: String,
+    totalTasks: Int,
+    totalGenerated: Int,
+    canShowCredits: Boolean,
+    aspectRatios: List<String>,
+    imageSizes: List<String>,
+    generationKeyConfigured: Boolean,
     models: List<ModelInfo>,
     modelStatus: Map<String, ModelStatusInfo>,
     selectedModel: ModelInfo?,
@@ -1340,20 +1424,21 @@ private fun CreateScreen(
             onRenameCustomTemplate = onRenameCustomTemplate,
         )
     } else {
-        LazyColumn(
-            contentPadding = PaddingValues(start = 14.dp, top = 14.dp, end = 14.dp, bottom = 124.dp),
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 14.dp, top = 14.dp, end = 14.dp, bottom = 124.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            item {
-                SummaryRow(state)
-            }
-            item {
+            SummaryRow(creditsBalance, totalTasks, totalGenerated, canShowCredits)
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SectionTitle(
                     "模型",
                     selectedModel?.let { if (showCreditEstimate) "${it.price} 积分/张" else "" } ?: "未连接",
                 )
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(models) { model ->
+                    items(models, key = { it.id }) { model ->
                         ModelOptionCard(
                             model = model,
                             status = modelStatus[model.id],
@@ -1364,18 +1449,18 @@ private fun CreateScreen(
                     }
                 }
             }
-            item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionTitle("比例")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    state.aspectRatios.forEach { ratio ->
+                    aspectRatios.forEach { ratio ->
                         FilterChip(selected = ratio == aspectRatio, onClick = { onAspectRatioChange(ratio) }, label = { Text(ratio) })
                     }
                 }
             }
-            item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionTitle("分辨率")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    state.imageSizes.forEach { size ->
+                    imageSizes.forEach { size ->
                         FilterChip(
                             selected = size == imageSize,
                             enabled = selectedModel?.supportsImageSize != false,
@@ -1385,81 +1470,69 @@ private fun CreateScreen(
                     }
                 }
             }
-            item {
-                OutlinedTextField(
-                    value = prompt,
-                    onValueChange = onPromptChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("提示词") },
-                    placeholder = { Text("描述你想生成的画面...") },
-                    minLines = 6,
-                )
-            }
-            item {
-                PromptTools(
-                    prompt = prompt,
-                    onPromptChange = onPromptChange,
-                    onAppendPrompt = onAppendPrompt,
-                    onOpenTemplates = { onShowTemplatePageChange(true) },
-                    onSaveAsTemplate = onSaveCurrentPromptAsTemplate,
-                    optimizing = optimizingPrompt,
-                    onOptimize = onOptimizePrompt,
-                )
-            }
-            item {
-                ElevatedCard {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                            Text("参考图 ${localImages.size} 张", fontWeight = FontWeight.Bold)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = onClearImages, enabled = localImages.isNotEmpty()) { Text("清空") }
-                                Button(onClick = { picker.launch("image/*") }) { Text("选择图片") }
-                            }
+            OutlinedTextField(
+                value = prompt,
+                onValueChange = onPromptChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("提示词") },
+                placeholder = { Text("描述你想生成的画面...") },
+                minLines = 6,
+            )
+            PromptTools(
+                prompt = prompt,
+                onPromptChange = onPromptChange,
+                onAppendPrompt = onAppendPrompt,
+                onOpenTemplates = { onShowTemplatePageChange(true) },
+                onSaveAsTemplate = onSaveCurrentPromptAsTemplate,
+                optimizing = optimizingPrompt,
+                onOptimize = onOptimizePrompt,
+            )
+            ElevatedCard {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                        Text("参考图 ${localImages.size} 张", fontWeight = FontWeight.Bold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = onClearImages, enabled = localImages.isNotEmpty()) { Text("清空") }
+                            Button(onClick = { picker.launch("image/*") }) { Text("选择图片") }
                         }
-                        if (localImages.isNotEmpty()) {
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(localImages) { image ->
-                                    ReferenceImageThumb(image, onRemove = { onRemoveImage(image) })
-                                }
+                    }
+                    if (localImages.isNotEmpty()) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(localImages, key = { it.id }) { image ->
+                                ReferenceImageThumb(image, onRemove = { onRemoveImage(image) })
                             }
                         }
                     }
                 }
             }
-            item {
-                OutlinedTextField(
-                    value = networkUrls,
-                    onValueChange = onNetworkUrlsChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("网络图片链接") },
-                    placeholder = { Text("每行一个 http/https 图片链接") },
-                    minLines = 3,
-                    isError = invalidUrlCount > 0,
-                    supportingText = {
-                        if (invalidUrlCount > 0) {
-                            Text("有 $invalidUrlCount 个链接不是 http/https 图片地址")
-                        }
-                    },
-                )
+            OutlinedTextField(
+                value = networkUrls,
+                onValueChange = onNetworkUrlsChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("网络图片链接") },
+                placeholder = { Text("每行一个 http/https 图片链接") },
+                minLines = 3,
+                isError = invalidUrlCount > 0,
+                supportingText = {
+                    if (invalidUrlCount > 0) {
+                        Text("有 $invalidUrlCount 个链接不是 http/https 图片地址")
+                    }
+                },
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                Text("队列数量", fontWeight = FontWeight.Bold)
+                QuantityStepper(queueCount, onQueueCountChange)
             }
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                    Text("队列数量", fontWeight = FontWeight.Bold)
-                    QuantityStepper(queueCount, onQueueCountChange)
-                }
-            }
-            item {
-                Text(
-                    text = when {
-                        !state.settings.apiKeySet -> "底部操作台已固定，先到设置保存生成 Key。"
-                        invalidUrlCount > 0 -> "修正图片链接后，底部操作台会恢复可提交状态。"
-                        prompt.isBlank() -> "填写提示词后，可直接通过底部操作台提交。"
-                        else -> "底部操作台会始终保持可见，方便随时提交创作任务。"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                text = when {
+                    !generationKeyConfigured -> "底部操作台已固定，先到设置保存生成 Key。"
+                    invalidUrlCount > 0 -> "修正图片链接后，底部操作台会恢复可提交状态。"
+                    prompt.isBlank() -> "填写提示词后，可直接通过底部操作台提交。"
+                    else -> "底部操作台会始终保持可见，方便随时提交创作任务。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -1914,14 +1987,18 @@ private fun AlbumPermissionCard(
 }
 
 @Composable
-private fun SummaryRow(state: ServerState) {
-    val useCreditEstimate = state.settings.modelProvider != "custom"
+private fun SummaryRow(
+    creditsBalance: String,
+    totalTasks: Int,
+    totalGenerated: Int,
+    canShowCredits: Boolean,
+) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        if (useCreditEstimate) {
-            SummaryCard("余额", state.credits.balance, Modifier.weight(1.2f))
+        if (canShowCredits) {
+            SummaryCard("余额", creditsBalance, Modifier.weight(1.2f))
         }
-        SummaryCard("队列", (state.pending.size + state.active.size).toString(), Modifier.weight(1f))
-        SummaryCard("生成", state.totalCount.toString(), Modifier.weight(1f))
+        SummaryCard("队列", totalTasks.toString(), Modifier.weight(1f))
+        SummaryCard("生成", totalGenerated.toString(), Modifier.weight(1f))
     }
 }
 
@@ -1932,6 +2009,49 @@ private fun SummaryCard(label: String, value: String, modifier: Modifier = Modif
             Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         }
+    }
+}
+
+private sealed interface ResultImageState {
+    data object Loading : ResultImageState
+    data class Loaded(val bitmap: Bitmap) : ResultImageState
+    data class Unavailable(val message: String) : ResultImageState
+}
+
+@Composable
+private fun ResultImageView(baseUrl: String, item: ImageItem, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val remoteUrl = absoluteUrl(baseUrl, item.displayUrl)
+    val imageState by produceState<ResultImageState>(
+        initialValue = ResultImageState.Loading,
+        item.savedImageUri,
+        remoteUrl,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val localBitmap = item.savedImageUri.takeIf { it.isNotBlank() }?.let { loadBitmap(context, it) }
+            when {
+                localBitmap != null -> ResultImageState.Loaded(localBitmap)
+                remoteUrl.isBlank() && item.savedImageUri.isBlank() -> ResultImageState.Unavailable("未保存，已超时")
+                else -> {
+                    val remoteBitmap = loadBitmap(remoteUrl)
+                    when {
+                        remoteBitmap != null -> ResultImageState.Loaded(remoteBitmap)
+                        item.savedImageUri.isNotBlank() -> ResultImageState.Unavailable("已保存，但本地图片不可用")
+                        else -> ResultImageState.Unavailable("未保存，已超时")
+                    }
+                }
+            }
+        }
+    }
+    when (val state = imageState) {
+        ResultImageState.Loading -> Text("加载中", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        is ResultImageState.Loaded -> Image(
+            bitmap = state.bitmap.asImageBitmap(),
+            contentDescription = null,
+            modifier = modifier,
+            contentScale = ContentScale.Fit,
+        )
+        is ResultImageState.Unavailable -> Text(state.message, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -1966,7 +2086,7 @@ private fun ResultScreen(
                     if (item == null) {
                         Text(busyText, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     } else {
-                        RemoteImage(absoluteUrl(baseUrl, item.displayUrl), Modifier.fillMaxSize())
+                        ResultImageView(baseUrl = baseUrl, item = item, modifier = Modifier.fillMaxSize())
                     }
                 }
             }
@@ -2626,6 +2746,14 @@ private fun SettingsScreen(
     albumPermissionGranted: Boolean,
     albumPermissionRequired: Boolean,
     onRequestAlbumPermission: () -> Unit,
+    currentVersion: String,
+    updateStatus: String,
+    latestVersion: String,
+    releaseUrl: String,
+    showUpdateDialog: Boolean,
+    onShowUpdateDialogChange: (Boolean) -> Unit,
+    onTriggerUpdateCheck: (Boolean, Boolean) -> Unit,
+    onIgnoreCurrentVersion: () -> Unit,
     onRefreshCredits: () -> Unit,
     onSave: () -> Unit,
 ) {
@@ -2642,36 +2770,6 @@ private fun SettingsScreen(
     var showApiSitePage by rememberSaveable { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val currentVersion = remember {
-        try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "" }
-        catch (_: Exception) { "" }
-    }
-    var updateStatus by rememberSaveable { mutableStateOf("idle") }
-    var latestVersion by rememberSaveable { mutableStateOf("") }
-    var releaseUrl by rememberSaveable { mutableStateOf("") }
-    var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    fun triggerUpdateCheck() {
-        scope.launch {
-            updateStatus = "checking"
-            try {
-                val (status, ver, url) = withContext(Dispatchers.IO) { checkGitHubUpdate(currentVersion) }
-                updateStatus = status
-                latestVersion = ver
-                releaseUrl = url
-                if (status == "available") showUpdateDialog = true
-            } catch (_: Exception) {
-                updateStatus = "error"
-            }
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        if (updateStatus == "idle") {
-            triggerUpdateCheck()
-        }
-    }
 
     val creditStatus = when (draft.creditQueryMode) {
         "token" -> if (tokenSet) "账户 Token 已配置" else "账户 Token 未配置"
@@ -2788,16 +2886,39 @@ private fun SettingsScreen(
                         }
                     }
                     if (modelMenuOpen) {
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(
-                                selected = !usingCustomProvider,
-                                onClick = { onDraftChange(draft.copy(modelProvider = "default")) },
-                                label = { Text("默认接口") },
-                            )
-                            FilterChip(
-                                selected = usingCustomProvider,
-                                onClick = { onDraftChange(draft.copy(modelProvider = "custom")) },
-                                label = { Text("自定义接口") },
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("接口切换", fontWeight = FontWeight.Bold)
+                                Text(
+                                    "选择当前用于生图的接口配置",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilterChip(
+                                    selected = !usingCustomProvider,
+                                    onClick = { onDraftChange(draft.copy(modelProvider = "default")) },
+                                    label = { Text(if (!usingCustomProvider) "默认接口 · 当前使用中" else "默认接口") },
+                                )
+                                draft.customProviders.ifEmpty { listOf(activeCustomProvider) }.forEach { provider ->
+                                    val selectedProvider = usingCustomProvider && provider.id == activeCustomProvider.id
+                                    FilterChip(
+                                        selected = selectedProvider,
+                                        onClick = { onDraftChange(draft.copy(modelProvider = "custom", activeCustomProviderId = provider.id)) },
+                                        label = {
+                                            Text(
+                                                if (selectedProvider) "${provider.name.ifBlank { provider.model.ifBlank { "自定义平台" } }} · 当前使用中"
+                                                else provider.name.ifBlank { provider.model.ifBlank { "自定义平台" } }
+                                            )
+                                        },
+                                    )
+                                }
+                            }
+                            Text(
+                                if (usingCustomProvider) "当前正在使用 ${activeCustomProvider.name.ifBlank { activeCustomProvider.model }}" else "当前正在使用默认接口",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
                             )
                         }
                         if (usingCustomProvider) {
@@ -2814,15 +2935,6 @@ private fun SettingsScreen(
                                     FilledTonalButton(onClick = { onDraftChange(draft.addCustomProvider()) }) {
                                         Text("新增")
                                     }
-                                }
-                            }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                draft.customProviders.ifEmpty { listOf(activeCustomProvider) }.forEach { provider ->
-                                    FilterChip(
-                                        selected = provider.id == activeCustomProvider.id,
-                                        onClick = { onDraftChange(draft.copy(modelProvider = "custom", activeCustomProviderId = provider.id)) },
-                                        label = { Text(provider.name.ifBlank { provider.model.ifBlank { "自定义平台" } }) },
-                                    )
                                 }
                             }
                             OutlinedTextField(
@@ -3115,7 +3227,7 @@ private fun SettingsScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { triggerUpdateCheck() },
+                                    .clickable { onTriggerUpdateCheck(true, false) },
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween,
                             ) {
@@ -3157,7 +3269,7 @@ private fun SettingsScreen(
                             }
                             if (updateStatus == "available") {
                                 Button(
-                                    onClick = { showUpdateDialog = true },
+                                    onClick = { onShowUpdateDialogChange(true) },
                                     modifier = Modifier.fillMaxWidth(),
                                 ) { Text("前往 GitHub 下载") }
                             }
@@ -3171,16 +3283,21 @@ private fun SettingsScreen(
 
     if (showUpdateDialog) {
         AlertDialog(
-            onDismissRequest = { showUpdateDialog = false },
+            onDismissRequest = { onShowUpdateDialogChange(false) },
             title = { Text("发现新版本") },
-            text = { Text("当前版本：v$currentVersion\n最新版本：v$latestVersion\n\n前往 GitHub 下载最新版本？") },
+            text = { Text("当前版本：v$currentVersion\n最新版本：v$latestVersion\n\n检测到可用更新，是否立即前往 GitHub 下载？") },
             confirmButton = {
                 Button(onClick = {
-                    showUpdateDialog = false
+                    onShowUpdateDialogChange(false)
                     openUrl(context, releaseUrl)
-                }) { Text("前往下载") }
+                }) { Text("立即更新") }
             },
-            dismissButton = { TextButton(onClick = { showUpdateDialog = false }) { Text("稍后") } },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onIgnoreCurrentVersion) { Text("本版本不再提示") }
+                    TextButton(onClick = { onShowUpdateDialogChange(false) }) { Text("稍后") }
+                }
+            },
         )
     }
 }
@@ -3521,7 +3638,7 @@ private suspend fun readUriAsDataUrl(context: Context, uri: Uri): LocalImage? = 
     val mime = resolver.getType(uri) ?: "image/png"
     val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@withContext null
     val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
-    LocalImage(uri.lastPathSegment ?: "image", "data:$mime;base64,$encoded")
+    LocalImage(name = uri.lastPathSegment ?: "image", dataUrl = "data:$mime;base64,$encoded")
 }
 
 private fun normalizeBaseUrl(value: String): String {

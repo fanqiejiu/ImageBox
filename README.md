@@ -88,6 +88,7 @@ app/src/main/java/com/example/myimageapplication/
     Theme.kt             # Material 3 主题配置
     Type.kt              # 字体排版
 ```
+
 ## License
 
 MIT License
