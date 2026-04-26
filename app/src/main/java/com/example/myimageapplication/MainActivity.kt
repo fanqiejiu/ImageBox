@@ -247,6 +247,7 @@ private data class SettingsInfo(
     val saveDir: String = "output",
     val maxConcurrency: Int = 3,
     val maxRetries: Int = 2,
+    val apiPlatform: String = "grsai",
 )
 
 private data class CreditsInfo(
@@ -343,6 +344,28 @@ private const val CUSTOM_PROVIDERS_PREF = "custom_providers"
 private const val ACTIVE_CUSTOM_PROVIDER_PREF = "active_custom_provider_id"
 private const val DEFAULT_CUSTOM_PROVIDER_ID = "custom-default"
 private const val DEFAULT_LLM_ROLE_PROMPT = "你是商业图像生成提示词优化助手。只输出优化后的提示词，不要解释，不要加标题。保留用户核心意图，补充主体、构图、光线、材质、风格、质量和画面完整性，适合图像生成模型。"
+
+private data class ApiPlatformInfo(
+    val id: String,
+    val name: String,
+    val apiUrl: String,
+    val description: String,
+)
+
+private val API_PLATFORMS = listOf(
+    ApiPlatformInfo(
+        id = "grsai",
+        name = "grsai",
+        apiUrl = "https://grsai.dakka.com.cn",
+        description = "grsai AI 图像生成平台，提供 Nano Banana 等多款图像模型，支持高画质商业图像输出。官网 grsai.com。",
+    ),
+    ApiPlatformInfo(
+        id = "deepseek",
+        name = "DeepSeek",
+        apiUrl = "https://api.deepseek.com",
+        description = "DeepSeek 深度求索，专注 AI 基础研究，提供先进的通用大语言模型与多模态能力。",
+    ),
+)
 private val DIRECT_ASPECT_RATIOS = listOf("auto", "16:9", "9:16", "1:1", "4:3")
 private val DIRECT_IMAGE_SIZES = listOf("1K", "2K", "4K")
 private val PROMPT_PRESETS = listOf(
@@ -1624,6 +1647,7 @@ private data class SettingsDraft(
     val saveDir: String = "output",
     val maxConcurrency: String = "3",
     val maxRetries: String = "2",
+    val apiPlatform: String = "grsai",
 ) {
     companion object {
         fun from(settings: SettingsInfo) = SettingsDraft(
@@ -1649,6 +1673,7 @@ private data class SettingsDraft(
             saveDir = settings.saveDir,
             maxConcurrency = settings.maxConcurrency.toString(),
             maxRetries = settings.maxRetries.toString(),
+            apiPlatform = settings.apiPlatform,
         )
     }
 }
@@ -1859,6 +1884,7 @@ private fun readDirectSettings(prefs: SharedPreferences): SettingsInfo {
         saveDir = "手机相册",
         maxConcurrency = prefs.getInt("max_concurrency", 3),
         maxRetries = prefs.getInt("max_retries", 2),
+        apiPlatform = prefs.getString("api_platform", "grsai") ?: "grsai",
     )
 }
 
@@ -1898,6 +1924,7 @@ private fun saveDirectSettings(prefs: SharedPreferences, draft: SettingsDraft) {
         .putString("llm_role_prompt", draft.llmRolePrompt.trim().ifBlank { DEFAULT_LLM_ROLE_PROMPT })
         .putInt("max_concurrency", (draft.maxConcurrency.toIntOrNull() ?: 3).coerceIn(1, 10))
         .putInt("max_retries", (draft.maxRetries.toIntOrNull() ?: 2).coerceIn(0, 10))
+        .putString("api_platform", draft.apiPlatform)
         .apply()
     if (draft.apiKey.isNotBlank()) prefs.edit().putString("api_key", draft.apiKey.trim()).apply()
     if (activeCustomConfig.apiKey.isNotBlank()) prefs.edit().putString("custom_api_key", activeCustomConfig.apiKey).apply()
@@ -1968,8 +1995,10 @@ private fun SettingsScreen(
     var creditMenuOpen by rememberSaveable { mutableStateOf(false) }
     var saveMenuOpen by rememberSaveable { mutableStateOf(false) }
     var aboutMenuOpen by rememberSaveable { mutableStateOf(false) }
+    var showPlatformPicker by rememberSaveable { mutableStateOf(false) }
 
     val context = LocalContext.current
+    val selectedPlatform = API_PLATFORMS.find { it.id == draft.apiPlatform } ?: API_PLATFORMS.first()
     val currentVersion = remember {
         try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "" }
         catch (_: Exception) { "" }
@@ -2006,6 +2035,53 @@ private fun SettingsScreen(
         else -> if (platformKeySet) "余额 Key 已配置" else "余额 Key 未配置"
     }
 
+    if (showPlatformPicker) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { showPlatformPicker = false }) {
+                    Text("← 返回")
+                }
+                Spacer(Modifier.weight(1f))
+                Text("API 网站", fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(64.dp))
+            }
+            LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(API_PLATFORMS) { platform ->
+                    ElevatedCard(
+                        modifier = Modifier.clickable {
+                            onDraftChange(draft.copy(apiPlatform = platform.id))
+                            showPlatformPicker = false
+                        },
+                    ) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text(platform.name, fontWeight = FontWeight.Bold)
+                                if (platform.id == draft.apiPlatform) {
+                                    Text("✓ 当前", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                            Text(platform.apiUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                platform.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    } else {
     LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { SectionTitle("直连平台设置", generationStatus) }
         item {
@@ -2033,6 +2109,35 @@ private fun SettingsScreen(
                         )
                     }
                     Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
+                }
+            }
+        }
+        item {
+            ElevatedCard {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp)
+                        .clickable { showPlatformPicker = true },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("API 网站", fontWeight = FontWeight.Bold)
+                        Text(
+                            selectedPlatform.name,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            selectedPlatform.description,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text("选择 >", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
@@ -2416,6 +2521,7 @@ private fun SettingsScreen(
                 }
             }
         }
+    }
     }
 
     if (showUpdateDialog) {
