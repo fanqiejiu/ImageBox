@@ -2363,7 +2363,9 @@ private fun SettingsScreen(
                                 }
                             }
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { triggerUpdateCheck() },
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween,
                             ) {
@@ -2374,7 +2376,7 @@ private fun SettingsScreen(
                                             "checking" -> "检查中…"
                                             "upToDate" -> "已是最新版本"
                                             "available" -> "发现新版本 v$latestVersion"
-                                            "error" -> "检查失败，请重试"
+                                            "error" -> "检查失败，点击重试"
                                             else -> "等待检测"
                                         },
                                         style = MaterialTheme.typography.bodySmall,
@@ -2408,12 +2410,6 @@ private fun SettingsScreen(
                                     onClick = { showUpdateDialog = true },
                                     modifier = Modifier.fillMaxWidth(),
                                 ) { Text("前往 GitHub 下载") }
-                            }
-                            if (updateStatus == "error" || updateStatus == "upToDate") {
-                                OutlinedButton(
-                                    onClick = { triggerUpdateCheck() },
-                                    modifier = Modifier.fillMaxWidth(),
-                                ) { Text("重新检查更新") }
                             }
                         }
                     }
