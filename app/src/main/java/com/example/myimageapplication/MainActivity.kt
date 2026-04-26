@@ -1,6 +1,7 @@
 package com.example.myimageapplication
 
 import android.Manifest
+import android.content.ClipData
 import android.content.Context
 import android.content.ContentValues
 import android.content.Intent
@@ -26,6 +27,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -83,6 +85,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -172,7 +176,7 @@ private fun LaunchSplashScreen() {
             Spacer(Modifier.height(18.dp))
             Text("Image box", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
-            Text("v0.2.1beta", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+            Text("v0.2.5beta", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
@@ -345,6 +349,8 @@ private const val CUSTOM_PROVIDERS_PREF = "custom_providers"
 private const val ACTIVE_CUSTOM_PROVIDER_PREF = "active_custom_provider_id"
 private const val DEFAULT_CUSTOM_PROVIDER_ID = "custom-default"
 private const val DEFAULT_LLM_ROLE_PROMPT = "你是商业图像生成提示词优化助手。只输出优化后的提示词，不要解释，不要加标题。保留用户核心意图，补充主体、构图、光线、材质、风格、质量和画面完整性，适合图像生成模型。"
+private const val PROMPT_TEMPLATES_PREF = "prompt_templates"
+private const val RECENT_PROMPT_TEMPLATES_PREF = "recent_prompt_templates"
 
 private data class ApiPlatformInfo(
     val id: String,
@@ -352,6 +358,14 @@ private data class ApiPlatformInfo(
     val apiUrl: String,
     val websiteUrl: String,
     val description: String,
+)
+
+private data class PromptTemplate(
+    val id: String,
+    val title: String,
+    val content: String,
+    val category: String,
+    val builtIn: Boolean = false,
 )
 
 private val API_PLATFORMS = listOf(
@@ -367,7 +381,35 @@ private val API_PLATFORMS = listOf(
         name = "DeepSeek",
         apiUrl = "https://api.deepseek.com",
         websiteUrl = "https://platform.deepseek.com",
-        description = "DeepSeek 深度求索，专注 AI 基础研究，提供先进的通用大语言模型与多模态能力。",
+        description = "DeepSeek 深度求索，专注 AI 基础研究，提供先进的通用大语言模型能力。",
+    ),
+    ApiPlatformInfo(
+        id = "gemini",
+        name = "Gemini",
+        apiUrl = "https://generativelanguage.googleapis.com",
+        websiteUrl = "https://aistudio.google.com",
+        description = "Google Gemini 官方 AI 平台，可申请 Gemini API 并管理模型调用。",
+    ),
+    ApiPlatformInfo(
+        id = "gpt",
+        name = "GPT / OpenAI",
+        apiUrl = "https://api.openai.com",
+        websiteUrl = "https://platform.openai.com",
+        description = "OpenAI 官方平台，可申请 GPT / 图像 / 语音等 API 服务。",
+    ),
+    ApiPlatformInfo(
+        id = "claude",
+        name = "Claude",
+        apiUrl = "https://api.anthropic.com",
+        websiteUrl = "https://console.anthropic.com",
+        description = "Anthropic Claude 官方开发者平台，可创建 Key 并管理 Claude API。",
+    ),
+    ApiPlatformInfo(
+        id = "openrouter",
+        name = "OpenRouter",
+        apiUrl = "https://openrouter.ai/api/v1",
+        websiteUrl = "https://openrouter.ai",
+        description = "OpenRouter 聚合多家大模型接口，适合统一接入多种模型服务。",
     ),
 )
 private val DIRECT_ASPECT_RATIOS = listOf("auto", "16:9", "9:16", "1:1", "4:3")
@@ -376,6 +418,12 @@ private val PROMPT_PRESETS = listOf(
     "清透二次元头像，柔和自然光，精致五官，干净背景，高完成度插画",
     "商业产品摄影，干净棚拍光，真实材质，高级灰背景，电商主图构图",
     "游戏像素风角色立绘，清晰轮廓，明亮配色，适合移动端图标",
+)
+
+private val BUILT_IN_PROMPT_TEMPLATES = listOf(
+    PromptTemplate("builtin-portrait", "头像", PROMPT_PRESETS[0], "内置模板", builtIn = true),
+    PromptTemplate("builtin-product", "产品", PROMPT_PRESETS[1], "内置模板", builtIn = true),
+    PromptTemplate("builtin-pixel", "像素", PROMPT_PRESETS[2], "内置模板", builtIn = true),
 )
 private val DIRECT_MODELS = listOf(
     ModelInfo("nano-banana-pro", "Nano Banana Pro", 1800, enabled = true, deprecated = false, supportsImageSize = true, endpoint = "/v1/draw/nano-banana"),
@@ -406,6 +454,17 @@ private fun ImagePlatformApp(
     var queueCount by rememberSaveable { mutableStateOf(1) }
     var saveToAlbum by rememberSaveable { mutableStateOf(prefs.getBoolean("save_to_album", false)) }
     var localImages by remember { mutableStateOf(emptyList<LocalImage>()) }
+    var customPromptTemplates by remember { mutableStateOf(readPromptTemplates(prefs)) }
+    var recentPromptTemplates by remember { mutableStateOf(readRecentPromptTemplates(prefs)) }
+    var showTemplatePage by rememberSaveable { mutableStateOf(false) }
+    var showSaveTemplateDialog by rememberSaveable { mutableStateOf(false) }
+    var showRenameTemplateDialog by rememberSaveable { mutableStateOf(false) }
+    var pendingTemplateContent by rememberSaveable { mutableStateOf("") }
+    var templateTitleDraft by rememberSaveable { mutableStateOf("") }
+    var renamingTemplateId by rememberSaveable { mutableStateOf("") }
+    var newTemplateTitle by rememberSaveable { mutableStateOf("") }
+    var newTemplateContent by rememberSaveable { mutableStateOf("") }
+    var newTemplateMenuOpen by rememberSaveable { mutableStateOf(false) }
     var selectedResult by remember { mutableStateOf<ImageItem?>(null) }
     var galleryMode by rememberSaveable { mutableStateOf("session") }
     var selectedArchiveDate by rememberSaveable { mutableStateOf("") }
@@ -424,6 +483,84 @@ private fun ImagePlatformApp(
 
     fun show(message: String) {
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    fun markTemplateUsed(template: PromptTemplate) {
+        val next = listOf(template.copy(category = "最近使用")) + recentPromptTemplates.filterNot { it.content == template.content }
+        recentPromptTemplates = next.take(12)
+        persistRecentPromptTemplates(prefs, recentPromptTemplates)
+    }
+
+    fun applyTemplate(template: PromptTemplate) {
+        prompt = template.content
+        markTemplateUsed(template)
+        showTemplatePage = false
+        show("模板已填入提示词")
+    }
+
+    fun savePromptAsTemplate(content: String, title: String? = null) {
+        val clean = content.trim()
+        if (clean.isBlank()) {
+            show("提示词为空，无法保存为模板")
+            return
+        }
+        val existing = customPromptTemplates.firstOrNull { it.content == clean }
+        if (existing != null) {
+            markTemplateUsed(existing)
+            show("该提示词已在模板中")
+            return
+        }
+        val template = PromptTemplate(
+            id = "custom-${UUID.randomUUID()}",
+            title = title?.trim().takeUnless { it.isNullOrBlank() } ?: clean.take(12),
+            content = clean,
+            category = "我的模板",
+        )
+        customPromptTemplates = listOf(template) + customPromptTemplates
+        persistPromptTemplates(prefs, customPromptTemplates)
+        markTemplateUsed(template)
+        show("已保存为模板")
+    }
+
+    fun openSaveTemplateDialog(content: String, title: String = content.trim().take(12)) {
+        val clean = content.trim()
+        if (clean.isBlank()) {
+            show("提示词为空，无法保存为模板")
+            return
+        }
+        pendingTemplateContent = clean
+        templateTitleDraft = title.ifBlank { clean.take(12) }
+        showSaveTemplateDialog = true
+    }
+
+    fun openRenameTemplateDialog(template: PromptTemplate) {
+        renamingTemplateId = template.id
+        templateTitleDraft = template.title
+        showRenameTemplateDialog = true
+    }
+
+    fun renamePromptTemplate(id: String, newTitle: String) {
+        val clean = newTitle.trim()
+        if (clean.isBlank()) {
+            show("模板标题不能为空")
+            return
+        }
+        customPromptTemplates = customPromptTemplates.map {
+            if (it.id == id) it.copy(title = clean) else it
+        }
+        persistPromptTemplates(prefs, customPromptTemplates)
+        recentPromptTemplates = recentPromptTemplates.map {
+            if (it.id == id) it.copy(title = clean) else it
+        }
+        persistRecentPromptTemplates(prefs, recentPromptTemplates)
+        show("模板标题已更新")
+    }
+
+    fun saveNewTemplateFromPage() {
+        savePromptAsTemplate(newTemplateContent, newTemplateTitle)
+        newTemplateTitle = ""
+        newTemplateContent = ""
+        newTemplateMenuOpen = false
     }
 
     val albumPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -492,9 +629,9 @@ private fun ImagePlatformApp(
             }
             show(
                 when {
-                    saved != null && automatic -> "已自动保存到手机相册"
-                    saved != null -> "已保存到手机相册"
-                    else -> "保存到相册失败，请确认图片可访问"
+                    saved != null && automatic -> "图片已自动保存到相册"
+                    saved != null -> "图片已保存到相册"
+                    else -> "保存失败，请确认图片仍可访问"
                 }
             )
         }
@@ -620,7 +757,7 @@ private fun ImagePlatformApp(
                         )
                     }
                 }
-                show("任务已直连提交")
+                show("已提交 ${pendingTasks.size} 个任务")
             } catch (error: Exception) {
                 show(error.message ?: "提交失败")
             } finally {
@@ -786,6 +923,25 @@ private fun ImagePlatformApp(
                     onAppendPrompt = { extra ->
                         prompt = if (prompt.isBlank()) extra else "$prompt，$extra"
                     },
+                    showTemplatePage = showTemplatePage,
+                    onShowTemplatePageChange = { showTemplatePage = it },
+                    builtInTemplates = BUILT_IN_PROMPT_TEMPLATES,
+                    customTemplates = customPromptTemplates,
+                    recentTemplates = recentPromptTemplates,
+                    newTemplateTitle = newTemplateTitle,
+                    newTemplateContent = newTemplateContent,
+                    newTemplateMenuOpen = newTemplateMenuOpen,
+                    onNewTemplateMenuOpenChange = { newTemplateMenuOpen = it },
+                    onNewTemplateTitleChange = { newTemplateTitle = it },
+                    onNewTemplateContentChange = { newTemplateContent = it },
+                    onSaveNewTemplate = ::saveNewTemplateFromPage,
+                    onApplyTemplate = ::applyTemplate,
+                    onDeleteCustomTemplate = {
+                        customPromptTemplates = customPromptTemplates.filterNot { template -> template.id == it.id }
+                        persistPromptTemplates(prefs, customPromptTemplates)
+                    },
+                    onRenameCustomTemplate = ::openRenameTemplateDialog,
+                    onSaveCurrentPromptAsTemplate = { openSaveTemplateDialog(prompt) },
                     optimizingPrompt = optimizingPrompt,
                     onOptimizePrompt = ::optimizeCurrentPrompt,
                     invalidUrlCount = invalidUrlCount,
@@ -815,9 +971,10 @@ private fun ImagePlatformApp(
                         )
                         localImages = listOf(reference)
                         currentTab = AppTab.Create
-                        show("已设为参考图，原有参考图已清空")
+                        show("已替换为新的参考图")
                     },
                     onSaveToAlbum = { saveItemToAlbum(it) },
+                    onSaveAsTemplate = { openSaveTemplateDialog(it.prompt, it.filename.ifBlank { it.modelName.ifBlank { "结果模板" } }) },
                     onShowLatest = { selectedResult = null },
                     pinned = selectedResult != null,
                 )
@@ -893,7 +1050,7 @@ private fun ImagePlatformApp(
                                     )
                                 )
                                 settingsDraft = SettingsDraft.from(readDirectSettings(prefs))
-                                show("设置已保存")
+                                show("设置已保存并生效")
                             } catch (error: Exception) {
                                 show(error.message ?: "保存失败")
                             }
@@ -902,6 +1059,59 @@ private fun ImagePlatformApp(
                 )
             }
         }
+    }
+
+    if (showSaveTemplateDialog) {
+        AlertDialog(
+            onDismissRequest = { showSaveTemplateDialog = false },
+            title = { Text("保存为模板") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("为这个提示词起一个方便识别的标题。")
+                    OutlinedTextField(
+                        value = templateTitleDraft,
+                        onValueChange = { templateTitleDraft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("模板标题") },
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    savePromptAsTemplate(pendingTemplateContent, templateTitleDraft)
+                    showSaveTemplateDialog = false
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSaveTemplateDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showRenameTemplateDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameTemplateDialog = false },
+            title = { Text("重命名模板") },
+            text = {
+                OutlinedTextField(
+                    value = templateTitleDraft,
+                    onValueChange = { templateTitleDraft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("模板标题") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    renamePromptTemplate(renamingTemplateId, templateTitleDraft)
+                    showRenameTemplateDialog = false
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameTemplateDialog = false }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -932,8 +1142,8 @@ private fun PlatformBottomBar(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 6.dp,
-        shadowElevation = 10.dp,
+        tonalElevation = 8.dp,
+        shadowElevation = 12.dp,
     ) {
         Column(
             modifier = Modifier
@@ -941,6 +1151,7 @@ private fun PlatformBottomBar(
                 .navigationBarsPadding(),
         ) {
             if (showDock) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 SubmitDock(
                     submitLabel = submitLabel,
                     submitMeta = submitMeta,
@@ -985,20 +1196,27 @@ private fun SubmitDock(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("创作任务", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(submitMeta, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
+            Text(
+                if (canSubmit) "参数已就绪，可直接提交" else "请先完成当前提交条件",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         Button(
             onClick = onSubmit,
             enabled = canSubmit,
             modifier = Modifier
-                .height(50.dp)
-                .widthIn(min = 118.dp),
+                .height(52.dp)
+                .widthIn(min = 132.dp),
         ) {
             Text(submitLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
@@ -1069,6 +1287,22 @@ private fun CreateScreen(
     prompt: String,
     onPromptChange: (String) -> Unit,
     onAppendPrompt: (String) -> Unit,
+    showTemplatePage: Boolean,
+    onShowTemplatePageChange: (Boolean) -> Unit,
+    builtInTemplates: List<PromptTemplate>,
+    customTemplates: List<PromptTemplate>,
+    recentTemplates: List<PromptTemplate>,
+    newTemplateTitle: String,
+    newTemplateContent: String,
+    newTemplateMenuOpen: Boolean,
+    onNewTemplateMenuOpenChange: (Boolean) -> Unit,
+    onNewTemplateTitleChange: (String) -> Unit,
+    onNewTemplateContentChange: (String) -> Unit,
+    onSaveNewTemplate: () -> Unit,
+    onApplyTemplate: (PromptTemplate) -> Unit,
+    onDeleteCustomTemplate: (PromptTemplate) -> Unit,
+    onRenameCustomTemplate: (PromptTemplate) -> Unit,
+    onSaveCurrentPromptAsTemplate: () -> Unit,
     optimizingPrompt: Boolean,
     onOptimizePrompt: () -> Unit,
     invalidUrlCount: Int,
@@ -1088,123 +1322,144 @@ private fun CreateScreen(
             onAddImages(uris.mapNotNull { uri -> readUriAsDataUrl(context, uri) })
         }
     }
-    LazyColumn(
-        contentPadding = PaddingValues(14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        item {
-            SummaryRow(state)
-        }
-        item {
-            SectionTitle(
-                "模型",
-                selectedModel?.let { if (showCreditEstimate) "${it.price} 积分/张" else "" } ?: "未连接",
-            )
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(models) { model ->
-                    ModelOptionCard(
-                        model = model,
-                        status = modelStatus[model.id],
-                        selected = selectedModelId == model.id,
-                        showCreditEstimate = showCreditEstimate,
-                        onClick = { onModelChange(model.id) },
-                    )
-                }
+    if (showTemplatePage) {
+        PromptTemplatePage(
+            builtInTemplates = builtInTemplates,
+            customTemplates = customTemplates,
+            recentTemplates = recentTemplates,
+            newTemplateTitle = newTemplateTitle,
+            newTemplateContent = newTemplateContent,
+            newTemplateMenuOpen = newTemplateMenuOpen,
+            onNewTemplateMenuOpenChange = onNewTemplateMenuOpenChange,
+            onNewTemplateTitleChange = onNewTemplateTitleChange,
+            onNewTemplateContentChange = onNewTemplateContentChange,
+            onSaveNewTemplate = onSaveNewTemplate,
+            onBack = { onShowTemplatePageChange(false) },
+            onApplyTemplate = onApplyTemplate,
+            onDeleteCustomTemplate = onDeleteCustomTemplate,
+            onRenameCustomTemplate = onRenameCustomTemplate,
+        )
+    } else {
+        LazyColumn(
+            contentPadding = PaddingValues(start = 14.dp, top = 14.dp, end = 14.dp, bottom = 124.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            item {
+                SummaryRow(state)
             }
-        }
-        item {
-            SectionTitle("比例")
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                state.aspectRatios.forEach { ratio ->
-                    FilterChip(selected = ratio == aspectRatio, onClick = { onAspectRatioChange(ratio) }, label = { Text(ratio) })
-                }
-            }
-        }
-        item {
-            SectionTitle("分辨率")
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                state.imageSizes.forEach { size ->
-                    FilterChip(
-                        selected = size == imageSize,
-                        enabled = selectedModel?.supportsImageSize != false,
-                        onClick = { onImageSizeChange(size) },
-                        label = { Text(size) },
-                    )
-                }
-            }
-        }
-        item {
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = onPromptChange,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("提示词") },
-                placeholder = { Text("描述你想生成的画面...") },
-                minLines = 6,
-            )
-        }
-        item {
-            PromptTools(
-                prompt = prompt,
-                onPromptChange = onPromptChange,
-                onAppendPrompt = onAppendPrompt,
-                optimizing = optimizingPrompt,
-                onOptimize = onOptimizePrompt,
-            )
-        }
-        item {
-            ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                        Text("参考图 ${localImages.size} 张", fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = onClearImages, enabled = localImages.isNotEmpty()) { Text("清空") }
-                            Button(onClick = { picker.launch("image/*") }) { Text("选择图片") }
-                        }
+            item {
+                SectionTitle(
+                    "模型",
+                    selectedModel?.let { if (showCreditEstimate) "${it.price} 积分/张" else "" } ?: "未连接",
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(models) { model ->
+                        ModelOptionCard(
+                            model = model,
+                            status = modelStatus[model.id],
+                            selected = selectedModelId == model.id,
+                            showCreditEstimate = showCreditEstimate,
+                            onClick = { onModelChange(model.id) },
+                        )
                     }
-                    if (localImages.isNotEmpty()) {
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(localImages) { image ->
-                                ReferenceImageThumb(image, onRemove = { onRemoveImage(image) })
+                }
+            }
+            item {
+                SectionTitle("比例")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.aspectRatios.forEach { ratio ->
+                        FilterChip(selected = ratio == aspectRatio, onClick = { onAspectRatioChange(ratio) }, label = { Text(ratio) })
+                    }
+                }
+            }
+            item {
+                SectionTitle("分辨率")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.imageSizes.forEach { size ->
+                        FilterChip(
+                            selected = size == imageSize,
+                            enabled = selectedModel?.supportsImageSize != false,
+                            onClick = { onImageSizeChange(size) },
+                            label = { Text(size) },
+                        )
+                    }
+                }
+            }
+            item {
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = onPromptChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("提示词") },
+                    placeholder = { Text("描述你想生成的画面...") },
+                    minLines = 6,
+                )
+            }
+            item {
+                PromptTools(
+                    prompt = prompt,
+                    onPromptChange = onPromptChange,
+                    onAppendPrompt = onAppendPrompt,
+                    onOpenTemplates = { onShowTemplatePageChange(true) },
+                    onSaveAsTemplate = onSaveCurrentPromptAsTemplate,
+                    optimizing = optimizingPrompt,
+                    onOptimize = onOptimizePrompt,
+                )
+            }
+            item {
+                ElevatedCard {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text("参考图 ${localImages.size} 张", fontWeight = FontWeight.Bold)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = onClearImages, enabled = localImages.isNotEmpty()) { Text("清空") }
+                                Button(onClick = { picker.launch("image/*") }) { Text("选择图片") }
+                            }
+                        }
+                        if (localImages.isNotEmpty()) {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(localImages) { image ->
+                                    ReferenceImageThumb(image, onRemove = { onRemoveImage(image) })
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        item {
-            OutlinedTextField(
-                value = networkUrls,
-                onValueChange = onNetworkUrlsChange,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("网络图片链接") },
-                placeholder = { Text("每行一个 http/https 图片链接") },
-                minLines = 3,
-                isError = invalidUrlCount > 0,
-                supportingText = {
-                    if (invalidUrlCount > 0) {
-                        Text("有 $invalidUrlCount 个链接不是 http/https 图片地址")
-                    }
-                },
-            )
-        }
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                Text("队列数量", fontWeight = FontWeight.Bold)
-                QuantityStepper(queueCount, onQueueCountChange)
+            item {
+                OutlinedTextField(
+                    value = networkUrls,
+                    onValueChange = onNetworkUrlsChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("网络图片链接") },
+                    placeholder = { Text("每行一个 http/https 图片链接") },
+                    minLines = 3,
+                    isError = invalidUrlCount > 0,
+                    supportingText = {
+                        if (invalidUrlCount > 0) {
+                            Text("有 $invalidUrlCount 个链接不是 http/https 图片地址")
+                        }
+                    },
+                )
             }
-        }
-        item {
-            Text(
-                text = when {
-                    !state.settings.apiKeySet -> "底部提交栏已就绪，先到设置保存生成 Key。"
-                    invalidUrlCount > 0 -> "修正图片链接后再提交。"
-                    prompt.isBlank() -> "填写提示词后，可直接使用底部提交栏。"
-                    else -> "底部提交栏会保持可见，滑动页面时也能随时提交。"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                    Text("队列数量", fontWeight = FontWeight.Bold)
+                    QuantityStepper(queueCount, onQueueCountChange)
+                }
+            }
+            item {
+                Text(
+                    text = when {
+                        !state.settings.apiKeySet -> "底部操作台已固定，先到设置保存生成 Key。"
+                        invalidUrlCount > 0 -> "修正图片链接后，底部操作台会恢复可提交状态。"
+                        prompt.isBlank() -> "填写提示词后，可直接通过底部操作台提交。"
+                        else -> "底部操作台会始终保持可见，方便随时提交创作任务。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -1215,23 +1470,245 @@ private fun PromptTools(
     prompt: String,
     onPromptChange: (String) -> Unit,
     onAppendPrompt: (String) -> Unit,
+    onOpenTemplates: () -> Unit,
+    onSaveAsTemplate: () -> Unit,
     optimizing: Boolean,
     onOptimize: () -> Unit,
 ) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        PROMPT_PRESETS.forEachIndexed { index, preset ->
-            FilterChip(
-                selected = false,
-                onClick = { onPromptChange(preset) },
-                label = { Text(listOf("头像", "产品", "像素")[index]) },
-            )
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            FilledTonalButton(
+                onClick = onOptimize,
+                enabled = prompt.isNotBlank() && !optimizing,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(if (optimizing) "优化中" else "AI优化提示词")
+            }
+            OutlinedButton(
+                onClick = onOpenTemplates,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("模板")
+            }
         }
-        FilledTonalButton(onClick = onOptimize, enabled = prompt.isNotBlank() && !optimizing) {
-            Text(if (optimizing) "优化中" else "AI优化提示词")
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            AssistChip(onClick = onSaveAsTemplate, enabled = prompt.isNotBlank(), label = { Text("保存为模板") })
+            AssistChip(onClick = { onPromptChange(prompt.trim()) }, enabled = prompt != prompt.trim(), label = { Text("整理文本") })
+            AssistChip(onClick = { onPromptChange("") }, enabled = prompt.isNotBlank(), label = { Text("清空内容") })
         }
-        AssistChip(onClick = { onAppendPrompt("高细节，干净构图，色彩协调，画面完整") }, label = { Text("增强") })
-        AssistChip(onClick = { onPromptChange("") }, enabled = prompt.isNotBlank(), label = { Text("清空") })
-        AssistChip(onClick = { onPromptChange(prompt.trim()) }, enabled = prompt != prompt.trim(), label = { Text("整理") })
+        Text(
+            "模板可快速套用常用提示词，也可在模板中心统一管理。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun PromptTemplatePage(
+    builtInTemplates: List<PromptTemplate>,
+    customTemplates: List<PromptTemplate>,
+    recentTemplates: List<PromptTemplate>,
+    newTemplateTitle: String,
+    newTemplateContent: String,
+    newTemplateMenuOpen: Boolean,
+    onNewTemplateMenuOpenChange: (Boolean) -> Unit,
+    onNewTemplateTitleChange: (String) -> Unit,
+    onNewTemplateContentChange: (String) -> Unit,
+    onSaveNewTemplate: () -> Unit,
+    onBack: () -> Unit,
+    onApplyTemplate: (PromptTemplate) -> Unit,
+    onDeleteCustomTemplate: (PromptTemplate) -> Unit,
+    onRenameCustomTemplate: (PromptTemplate) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onBack) { Text("← 返回") }
+            Spacer(Modifier.weight(1f))
+            Text("提示词模板", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(64.dp))
+        }
+        LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "点击模板会直接替换当前提示词，这里也可以手动录入新的模板。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "首页更适合保存当前提示词，这里更适合集中管理和新增模板。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            item {
+                ElevatedCard {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onNewTemplateMenuOpenChange(!newTemplateMenuOpen) },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("新增模板", fontWeight = FontWeight.Bold)
+                                Text("手动录入一个新的模板标题与内容", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Text(if (newTemplateMenuOpen) "收起" else "展开", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (newTemplateMenuOpen) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                OutlinedTextField(
+                                    value = newTemplateTitle,
+                                    onValueChange = onNewTemplateTitleChange,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("模板标题") },
+                                    singleLine = true,
+                                )
+                                OutlinedTextField(
+                                    value = newTemplateContent,
+                                    onValueChange = onNewTemplateContentChange,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("模板内容") },
+                                    minLines = 4,
+                                )
+                                Button(
+                                    onClick = onSaveNewTemplate,
+                                    enabled = newTemplateTitle.isNotBlank() && newTemplateContent.isNotBlank(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("保存模板") }
+                            }
+                        }
+                    }
+                }
+            }
+            if (recentTemplates.isNotEmpty()) {
+                item {
+                    TemplateSectionCard(title = "最近使用", subtitle = "你最近点击过的模板") {
+                        recentTemplates.forEach { template ->
+                            PromptTemplateCard(template = template, onClick = { onApplyTemplate(template) })
+                        }
+                    }
+                }
+            }
+            item {
+                TemplateSectionCard(title = "内置模板", subtitle = "适合快速开始的官方推荐模板") {
+                    builtInTemplates.forEach { template ->
+                        PromptTemplateCard(template = template, onClick = { onApplyTemplate(template) })
+                    }
+                }
+            }
+            item {
+                TemplateSectionCard(title = "我的模板", subtitle = "保存常用提示词，形成自己的模板库") {
+                    if (customTemplates.isEmpty()) {
+                        ElevatedCard {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("还没有自定义模板", fontWeight = FontWeight.Bold)
+                                Text(
+                                    "先保存一个常用提示词，后续就能一键复用。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    } else {
+                        customTemplates.forEach { template ->
+                            PromptTemplateCard(
+                                template = template,
+                                onClick = { onApplyTemplate(template) },
+                                trailing = {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        TextButton(onClick = { onRenameCustomTemplate(template) }) { Text("重命名") }
+                                        TextButton(onClick = { onDeleteCustomTemplate(template) }) { Text("删除") }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TemplateSectionCard(
+    title: String,
+    subtitle: String,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    ElevatedCard {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, fontWeight = FontWeight.Bold)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun PromptTemplateCard(
+    template: PromptTemplate,
+    onClick: () -> Unit,
+    trailing: (@Composable () -> Unit)? = null,
+) {
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    ElevatedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() },
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(template.title, fontWeight = FontWeight.Bold)
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = if (template.builtIn) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                ) {
+                    Text(
+                        template.category,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (template.builtIn) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    template.content,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = {
+                    scope.launch {
+                        clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("template", template.content)))
+                    }
+                }) { Text("复制") }
+                trailing?.invoke()
+            }
+        }
     }
 }
 
@@ -1468,6 +1945,7 @@ private fun ResultScreen(
     onReusePrompt: (ImageItem) -> Unit,
     onUseAsReference: (ImageItem) -> Unit,
     onSaveToAlbum: (ImageItem) -> Unit,
+    onSaveAsTemplate: (ImageItem) -> Unit,
     onShowLatest: () -> Unit,
 ) {
     LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1499,14 +1977,20 @@ private fun ResultScreen(
             }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        if (pinned) "当前正在查看历史结果" else "当前展示最新生成结果",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(onClick = { onOpen(item) }, modifier = Modifier.weight(1f)) { Text("打开") }
-                        FilledTonalButton(onClick = { onSaveToAlbum(item) }, modifier = Modifier.weight(1f)) { Text("存相册") }
+                        Button(onClick = { onSaveToAlbum(item) }, modifier = Modifier.weight(1f)) { Text("存相册") }
+                        FilledTonalButton(onClick = { onOpen(item) }, modifier = Modifier.weight(1f)) { Text("打开") }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(onClick = { onReusePrompt(item) }, modifier = Modifier.weight(1f)) { Text("复用提示词") }
-                        OutlinedButton(onClick = { onUseAsReference(item) }, modifier = Modifier.weight(1f)) { Text("作为参考图") }
+                        OutlinedButton(onClick = { onReusePrompt(item) }, modifier = Modifier.weight(1f)) { Text("带回提示词") }
+                        OutlinedButton(onClick = { onUseAsReference(item) }, modifier = Modifier.weight(1f)) { Text("设为参考图") }
                     }
+                    OutlinedButton(onClick = { onSaveAsTemplate(item) }, modifier = Modifier.fillMaxWidth()) { Text("保存为模板") }
                 }
             }
             item {
@@ -1572,7 +2056,13 @@ private fun HistoryScreen(
         if (archiveLoading) {
             item { Text("正在加载归档...") }
         } else if (filtered.isEmpty()) {
-            item { Text(if (mode == "archive") "该日期没有保存图片" else "暂无当前记录") }
+            item {
+                Text(
+                    if (filter.isNotBlank()) "没有匹配的历史记录，试试其他关键词"
+                    else if (mode == "archive") "该日期没有保存图片"
+                    else "暂无当前记录"
+                )
+            }
         } else {
             items(filtered) { item ->
                 HistoryCard(baseUrl, item, onPick)
@@ -1629,7 +2119,7 @@ private fun HistoryCard(baseUrl: String, item: ImageItem, onPick: (ImageItem) ->
             .fillMaxWidth()
             .clickable { onPick(item) },
     ) {
-        Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             val hasThumbnailSource = item.savedImageUri.isNotBlank() || item.displayUrl.isNotBlank()
             if (hasThumbnailSource) {
                 HistoryThumbnail(
@@ -1640,10 +2130,31 @@ private fun HistoryCard(baseUrl: String, item: ImageItem, onPick: (ImageItem) ->
                         .clip(RoundedCornerShape(10.dp)),
                 )
             }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(item.filename.ifBlank { item.taskId.ifBlank { "保存图片" } }, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(item.modelName.ifBlank { item.model }, style = MaterialTheme.typography.bodySmall)
-                Text(item.createdAt, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        item.filename.ifBlank { item.taskId.ifBlank { "保存图片" } },
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (item.savedImageUri.isNotBlank()) {
+                        Text(
+                            "已保存",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                FlowMeta(listOf(item.modelName.ifBlank { item.model }, item.createdAt).filter { it.isNotBlank() })
+                if (item.info.isNotBlank()) {
+                    Text(item.info, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 Text(item.prompt, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -1919,6 +2430,75 @@ private fun persistDirectHistory(prefs: SharedPreferences, history: List<ImageIt
     prefs.edit().putString("direct_history", array.toString()).apply()
 }
 
+private fun readPromptTemplates(prefs: SharedPreferences): List<PromptTemplate> {
+    val raw = prefs.getString(PROMPT_TEMPLATES_PREF, "[]").orEmpty()
+    return runCatching {
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                val json = array.optJSONObject(index) ?: continue
+                add(
+                    PromptTemplate(
+                        id = json.optString("id").ifBlank { "template-${index + 1}" },
+                        title = json.optString("title").ifBlank { "自定义模板 ${index + 1}" },
+                        content = json.optString("content"),
+                        category = json.optString("category").ifBlank { "我的模板" },
+                    )
+                )
+            }
+        }.filter { it.content.isNotBlank() }
+    }.getOrDefault(emptyList())
+}
+
+private fun persistPromptTemplates(prefs: SharedPreferences, templates: List<PromptTemplate>) {
+    val array = JSONArray()
+    templates.take(50).forEach { item ->
+        array.put(
+            JSONObject()
+                .put("id", item.id)
+                .put("title", item.title)
+                .put("content", item.content)
+                .put("category", item.category)
+        )
+    }
+    prefs.edit().putString(PROMPT_TEMPLATES_PREF, array.toString()).apply()
+}
+
+private fun readRecentPromptTemplates(prefs: SharedPreferences): List<PromptTemplate> {
+    val raw = prefs.getString(RECENT_PROMPT_TEMPLATES_PREF, "[]").orEmpty()
+    return runCatching {
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                val json = array.optJSONObject(index) ?: continue
+                add(
+                    PromptTemplate(
+                        id = json.optString("id").ifBlank { "recent-${index + 1}" },
+                        title = json.optString("title").ifBlank { "最近使用 ${index + 1}" },
+                        content = json.optString("content"),
+                        category = "最近使用",
+                        builtIn = json.optBoolean("built_in", false),
+                    )
+                )
+            }
+        }.filter { it.content.isNotBlank() }
+    }.getOrDefault(emptyList())
+}
+
+private fun persistRecentPromptTemplates(prefs: SharedPreferences, templates: List<PromptTemplate>) {
+    val array = JSONArray()
+    templates.take(12).forEach { item ->
+        array.put(
+            JSONObject()
+                .put("id", item.id)
+                .put("title", item.title)
+                .put("content", item.content)
+                .put("built_in", item.builtIn)
+        )
+    }
+    prefs.edit().putString(RECENT_PROMPT_TEMPLATES_PREF, array.toString()).apply()
+}
+
 private fun readDirectSettings(prefs: SharedPreferences): SettingsInfo {
     val provider = prefs.getString("model_provider", "default") ?: "default"
     val apiHost = normalizeRemoteBase(prefs.getString("api_host", DEFAULT_API_HOST) ?: DEFAULT_API_HOST)
@@ -2115,20 +2695,33 @@ private fun SettingsScreen(
                 Spacer(Modifier.width(64.dp))
             }
             LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                item {
+                    Text(
+                        "选择平台官网、文档或账户入口，快速申请或查看 API 服务信息。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 items(API_PLATFORMS) { platform ->
                     ElevatedCard(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { openUrl(context, platform.websiteUrl) },
                     ) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(platform.name, fontWeight = FontWeight.Bold)
-                            Text(platform.websiteUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(
-                                platform.description,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(platform.name, fontWeight = FontWeight.Bold)
+                                Text(platform.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(platform.websiteUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                Text("API: ${platform.apiUrl}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Text("打开官网", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                         }
                     }
                 }
@@ -2169,22 +2762,24 @@ private fun SettingsScreen(
             ElevatedCard {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { modelMenuOpen = !modelMenuOpen },
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text("模型接入方", fontWeight = FontWeight.Bold)
                             Text(
-                                if (usingCustomProvider) "自定义接口 · ${activeCustomProvider.name.ifBlank { activeCustomProvider.model }}" else "默认接口",
+                                if (usingCustomProvider) "自定义接口 · ${activeCustomProvider.name.ifBlank { activeCustomProvider.model }} · ${if (activeCustomKeySet) "Key 已配置" else "Key 未配置"}" else "默认接口 · ${if (defaultKeySet) "Key 已配置" else "Key 未配置"}",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                generationStatus,
-                                style = MaterialTheme.typography.labelMedium,
+                                "修改后需点击保存才会生效",
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -2261,13 +2856,13 @@ private fun SettingsScreen(
                                 value = draft.apiHost,
                                 onValueChange = { onDraftChange(draft.copy(apiHost = it)) },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("生成 Host") },
+                                label = { Text("默认接口生成 Host") },
                                 singleLine = true,
                             )
                             SecretTextField(
                                 value = draft.apiKey,
                                 onValueChange = { onDraftChange(draft.copy(apiKey = it)) },
-                                label = if (defaultKeySet) "生成 API Key（留空不覆盖）" else "生成 API Key",
+                                label = if (defaultKeySet) "默认接口生成 Key（留空不覆盖）" else "默认接口生成 Key",
                             )
                         }
                     }
@@ -2278,7 +2873,9 @@ private fun SettingsScreen(
             ElevatedCard {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { llmMenuOpen = !llmMenuOpen },
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
@@ -2329,7 +2926,9 @@ private fun SettingsScreen(
             ElevatedCard {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { creditMenuOpen = !creditMenuOpen },
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
@@ -2406,7 +3005,9 @@ private fun SettingsScreen(
             ElevatedCard {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { saveMenuOpen = !saveMenuOpen },
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
@@ -2480,7 +3081,9 @@ private fun SettingsScreen(
             ElevatedCard {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { aboutMenuOpen = !aboutMenuOpen },
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
@@ -2520,10 +3123,10 @@ private fun SettingsScreen(
                                     Text("更新状态", fontWeight = FontWeight.Bold)
                                     Text(
                                         when (updateStatus) {
-                                            "checking" -> "检查中…"
-                                            "upToDate" -> "已是最新版本"
+                                            "checking" -> "正在检查更新…"
+                                            "upToDate" -> "当前已是最新版本"
                                             "available" -> "发现新版本 v$latestVersion"
-                                            "error" -> "检查失败，点击重试"
+                                            "error" -> "检查失败，点击此处重试"
                                             else -> "等待检测"
                                         },
                                         style = MaterialTheme.typography.bodySmall,
@@ -3020,10 +3623,10 @@ private const val GITHUB_OWNER = "fanqiejiu"
 private const val GITHUB_REPO = "ImageBox"
 
 private fun updateStatusText(status: String, latest: String): String = when (status) {
-    "checking" -> "检查中…"
-    "upToDate" -> "已是最新"
-    "available" -> "有新版本 v$latest"
-    "error" -> "检测失败"
+    "checking" -> "正在检查更新"
+    "upToDate" -> "当前已是最新版本"
+    "available" -> "发现新版本 v$latest"
+    "error" -> "检查失败，点击重试"
     else -> "等待检测"
 }
 
