@@ -349,6 +349,7 @@ private data class ApiPlatformInfo(
     val id: String,
     val name: String,
     val apiUrl: String,
+    val websiteUrl: String,
     val description: String,
 )
 
@@ -357,12 +358,14 @@ private val API_PLATFORMS = listOf(
         id = "grsai",
         name = "grsai",
         apiUrl = "https://grsai.dakka.com.cn",
-        description = "grsai AI 图像生成平台，提供 Nano Banana 等多款图像模型，支持高画质商业图像输出。官网 grsai.com。",
+        websiteUrl = "https://grsai.com/zh",
+        description = "grsai AI 图像生成平台，提供 Nano Banana 等多款图像模型，支持高画质商业图像输出。",
     ),
     ApiPlatformInfo(
         id = "deepseek",
         name = "DeepSeek",
         apiUrl = "https://api.deepseek.com",
+        websiteUrl = "https://platform.deepseek.com",
         description = "DeepSeek 深度求索，专注 AI 基础研究，提供先进的通用大语言模型与多模态能力。",
     ),
 )
@@ -1995,10 +1998,9 @@ private fun SettingsScreen(
     var creditMenuOpen by rememberSaveable { mutableStateOf(false) }
     var saveMenuOpen by rememberSaveable { mutableStateOf(false) }
     var aboutMenuOpen by rememberSaveable { mutableStateOf(false) }
-    var showPlatformPicker by rememberSaveable { mutableStateOf(false) }
+    var apiSiteMenuOpen by rememberSaveable { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val selectedPlatform = API_PLATFORMS.find { it.id == draft.apiPlatform } ?: API_PLATFORMS.first()
     val currentVersion = remember {
         try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "" }
         catch (_: Exception) { "" }
@@ -2035,53 +2037,6 @@ private fun SettingsScreen(
         else -> if (platformKeySet) "余额 Key 已配置" else "余额 Key 未配置"
     }
 
-    if (showPlatformPicker) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = { showPlatformPicker = false }) {
-                    Text("← 返回")
-                }
-                Spacer(Modifier.weight(1f))
-                Text("API 网站", fontWeight = FontWeight.Bold)
-                Spacer(Modifier.weight(1f))
-                Spacer(Modifier.width(64.dp))
-            }
-            LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(API_PLATFORMS) { platform ->
-                    ElevatedCard(
-                        modifier = Modifier.clickable {
-                            onDraftChange(draft.copy(apiPlatform = platform.id))
-                            showPlatformPicker = false
-                        },
-                    ) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Text(platform.name, fontWeight = FontWeight.Bold)
-                                if (platform.id == draft.apiPlatform) {
-                                    Text("✓ 当前", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                                }
-                            }
-                            Text(platform.apiUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(
-                                platform.description,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    } else {
     LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { SectionTitle("直连平台设置", generationStatus) }
         item {
@@ -2109,35 +2064,6 @@ private fun SettingsScreen(
                         )
                     }
                     Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
-                }
-            }
-        }
-        item {
-            ElevatedCard {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp)
-                        .clickable { showPlatformPicker = true },
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("API 网站", fontWeight = FontWeight.Bold)
-                        Text(
-                            selectedPlatform.name,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            selectedPlatform.description,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Text("选择 >", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
@@ -2368,6 +2294,44 @@ private fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
+                        Text("API 网站", fontWeight = FontWeight.Bold)
+                        TextButton(onClick = { apiSiteMenuOpen = !apiSiteMenuOpen }) {
+                            Text(if (apiSiteMenuOpen) "收起" else "展开")
+                        }
+                    }
+                    if (apiSiteMenuOpen) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            API_PLATFORMS.forEach { platform ->
+                                ElevatedCard(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { openUrl(context, platform.websiteUrl) },
+                                ) {
+                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(platform.name, fontWeight = FontWeight.Bold)
+                                        Text(platform.websiteUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(
+                                            platform.description,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            ElevatedCard {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text("保存与权限", fontWeight = FontWeight.Bold)
                             Text(
@@ -2521,7 +2485,6 @@ private fun SettingsScreen(
                 }
             }
         }
-    }
     }
 
     if (showUpdateDialog) {
