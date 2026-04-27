@@ -25,6 +25,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +40,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -441,7 +443,7 @@ private val DIRECT_MODELS = listOf(
     ModelInfo("nano-banana-pro", "Nano Banana Pro", 1800, enabled = true, deprecated = false, supportsImageSize = true, endpoint = "/v1/draw/nano-banana"),
     ModelInfo("nano-banana", "Nano Banana", 1400, enabled = true, deprecated = false, supportsImageSize = true, endpoint = "/v1/draw/nano-banana"),
     ModelInfo("nano-banana-fast", "Nano Banana Fast", 440, enabled = true, deprecated = false, supportsImageSize = true, endpoint = "/v1/draw/nano-banana"),
-    ModelInfo("gpt-image-2", "GPT Image 2", 600, enabled = true, deprecated = false, supportsImageSize = false, endpoint = "/v1/draw/completions"),
+    ModelInfo("gpt-image-2", "GPT Image 2", 600, enabled = true, deprecated = false, supportsImageSize = true, endpoint = "/v1/draw/completions"),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -494,6 +496,7 @@ private fun ImagePlatformApp(
     var updateStatus by rememberSaveable { mutableStateOf("idle") }
     var latestVersion by rememberSaveable { mutableStateOf("") }
     var releaseUrl by rememberSaveable { mutableStateOf("") }
+    var releaseNotes by rememberSaveable { mutableStateOf("") }
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
 
     fun directClient() = DirectApiClient.fromPrefs(prefs)
@@ -598,11 +601,12 @@ private fun ImagePlatformApp(
             if (!force && fromStartup && now - lastCheckMs < 24L * 60L * 60L * 1000L) return@launch
             updateStatus = "checking"
             try {
-                val (status, ver, url) = withContext(Dispatchers.IO) { checkGitHubUpdate(currentVersion) }
+                val (status, ver, url, notes) = withContext(Dispatchers.IO) { checkGitHubUpdate(currentVersion) }
                 prefs.edit().putLong(UPDATE_LAST_CHECK_MS_PREF, now).apply()
                 updateStatus = status
                 latestVersion = ver
                 releaseUrl = url
+                releaseNotes = notes
                 if (status == "available") {
                     if (!fromStartup || ignoredVersion != ver) {
                         showUpdateDialog = true
@@ -885,7 +889,11 @@ private fun ImagePlatformApp(
                     prompt = job.prompt,
                     model = job.model,
                     modelName = job.modelName,
-                    info = "${job.imageSize} | ${((System.currentTimeMillis() - job.startedAtMs) / 60000.0).formatOne()} 分 | 重试 ${job.retries} 次",
+                    info = listOf(
+                        if (job.imageSize.isNotBlank()) job.imageSize else "",
+                        "${((System.currentTimeMillis() - job.startedAtMs) / 60000.0).formatOne()} 分",
+                        "重试 ${job.retries} 次",
+                    ).filter { it.isNotBlank() }.joinToString(" | "),
                     createdAt = nowText(),
                     taskId = job.taskId,
                 )
@@ -1101,6 +1109,7 @@ private fun ImagePlatformApp(
                     updateStatus = updateStatus,
                     latestVersion = latestVersion,
                     releaseUrl = releaseUrl,
+                    releaseNotes = releaseNotes,
                     showUpdateDialog = showUpdateDialog,
                     onShowUpdateDialogChange = { showUpdateDialog = it },
                     onTriggerUpdateCheck = { force, fromStartup -> triggerUpdateCheck(force, fromStartup) },
@@ -2750,6 +2759,7 @@ private fun SettingsScreen(
     updateStatus: String,
     latestVersion: String,
     releaseUrl: String,
+    releaseNotes: String,
     showUpdateDialog: Boolean,
     onShowUpdateDialogChange: (Boolean) -> Unit,
     onTriggerUpdateCheck: (Boolean, Boolean) -> Unit,
@@ -3285,7 +3295,39 @@ private fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { onShowUpdateDialogChange(false) },
             title = { Text("发现新版本") },
-            text = { Text("当前版本：v$currentVersion\n最新版本：v$latestVersion\n\n检测到可用更新，是否立即前往 GitHub 下载？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(onClick = {}, label = { Text("当前 v$currentVersion") })
+                        AssistChip(onClick = {}, label = { Text("最新 v$latestVersion") })
+                    }
+                    if (releaseNotes.isNotBlank()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("本次更新内容", fontWeight = FontWeight.Bold)
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                            ) {
+                                SelectionContainer {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 220.dp)
+                                            .verticalScroll(rememberScrollState())
+                                            .padding(12.dp),
+                                    ) {
+                                        Text(
+                                            releaseNotes,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             confirmButton = {
                 Button(onClick = {
                     onShowUpdateDialogChange(false)
@@ -3293,7 +3335,7 @@ private fun SettingsScreen(
                 }) { Text("立即更新") }
             },
             dismissButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = onIgnoreCurrentVersion) { Text("本版本不再提示") }
                     TextButton(onClick = { onShowUpdateDialogChange(false) }) { Text("稍后") }
                 }
@@ -3747,7 +3789,7 @@ private fun updateStatusText(status: String, latest: String): String = when (sta
     else -> "等待检测"
 }
 
-private fun checkGitHubUpdate(currentVersion: String): Triple<String, String, String> {
+private fun checkGitHubUpdate(currentVersion: String): List<String> {
     val url = URL("https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases")
     val connection = url.openConnection() as HttpURLConnection
     connection.setRequestProperty("Accept", "application/vnd.github+json")
@@ -3756,14 +3798,15 @@ private fun checkGitHubUpdate(currentVersion: String): Triple<String, String, St
     try {
         val body = connection.inputStream.bufferedReader().readText()
         val array = JSONArray(body)
-        val latest = array.optJSONObject(0) ?: return Triple("error", "", "")
+        val latest = array.optJSONObject(0) ?: return listOf("error", "", "", "")
         val tagName = latest.optString("tag_name", "").trimStart('v')
         val htmlUrl = latest.optString("html_url", "")
-        if (tagName.isBlank()) return Triple("error", "", "")
+        val notes = latest.optString("body", "").trim()
+        if (tagName.isBlank()) return listOf("error", "", "", "")
         return if (tagName != currentVersion.trimStart('v')) {
-            Triple("available", tagName, htmlUrl)
+            listOf("available", tagName, htmlUrl, notes)
         } else {
-            Triple("upToDate", tagName, htmlUrl)
+            listOf("upToDate", tagName, htmlUrl, notes)
         }
     } finally {
         connection.disconnect()
