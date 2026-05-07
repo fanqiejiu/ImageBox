@@ -460,6 +460,11 @@ private val DIRECT_MODELS = listOf(
     ModelInfo("gpt-image-2-vip", "GPT Image 2 VIP", 900, enabled = true, deprecated = false, supportsImageSize = true, supportsQuality = true, endpoint = "/v1/api/generate"),
 )
 
+private data class ImageSizeDisplay(
+    val title: String,
+    val subtitle: String = "",
+)
+
 private fun ModelInfo.usesApiGenerate(): Boolean = endpoint == "/v1/api/generate"
 
 private fun imageSizeOptionsFor(model: ModelInfo?): List<String> =
@@ -467,6 +472,23 @@ private fun imageSizeOptionsFor(model: ModelInfo?): List<String> =
 
 private fun defaultImageSizeFor(model: ModelInfo?): String =
     if (model?.id == "gpt-image-2-vip") "auto" else "4K"
+
+private fun imageSizeDisplay(model: ModelInfo?, size: String): ImageSizeDisplay =
+    if (model?.id != "gpt-image-2-vip") {
+        ImageSizeDisplay(size)
+    } else {
+        when (size) {
+            "auto" -> ImageSizeDisplay("自动")
+            "1024x1024" -> ImageSizeDisplay("1K 方", "1024×1024")
+            "1536x1024" -> ImageSizeDisplay("1.5K 横", "1536×1024")
+            "1024x1536" -> ImageSizeDisplay("1.5K 竖", "1024×1536")
+            "2048x2048" -> ImageSizeDisplay("2K 方", "2048×2048")
+            "2048x1152" -> ImageSizeDisplay("2K 横", "2048×1152")
+            "3840x2160" -> ImageSizeDisplay("4K 横", "3840×2160")
+            "2160x3840" -> ImageSizeDisplay("4K 竖", "2160×3840")
+            else -> ImageSizeDisplay(size)
+        }
+    }
 
 private fun qualityOptionsFor(model: ModelInfo?): List<String> =
     if (model?.supportsQuality == true) GPT_IMAGE_2_VIP_QUALITIES else emptyList()
@@ -1536,14 +1558,34 @@ private fun CreateScreen(
             }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionTitle("分辨率")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    availableImageSizes.forEach { size ->
-                        FilterChip(
-                            selected = size == imageSize,
-                            enabled = selectedModel?.supportsImageSize != false,
-                            onClick = { onImageSizeChange(size) },
-                            label = { Text(size) },
-                        )
+                if (selectedUsesApiGenerate) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        availableImageSizes.chunked(4).forEach { rowSizes ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                rowSizes.forEach { size ->
+                                    ImageSizeOption(
+                                        model = selectedModel,
+                                        size = size,
+                                        selected = size == imageSize,
+                                        enabled = selectedModel?.supportsImageSize != false,
+                                        onClick = { onImageSizeChange(size) },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        availableImageSizes.forEach { size ->
+                            ImageSizeOption(
+                                model = selectedModel,
+                                size = size,
+                                selected = size == imageSize,
+                                enabled = selectedModel?.supportsImageSize != false,
+                                onClick = { onImageSizeChange(size) },
+                            )
+                        }
                     }
                 }
             }
@@ -1925,6 +1967,66 @@ private fun ReferenceImageThumb(image: LocalImage, onRemove: (() -> Unit)? = nul
                 }
             }
             Text(image.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+private fun ImageSizeOption(
+    model: ModelInfo?,
+    size: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (model?.id != "gpt-image-2-vip") {
+        FilterChip(
+            modifier = modifier,
+            selected = selected,
+            enabled = enabled,
+            onClick = onClick,
+            label = { Text(size) },
+        )
+        return
+    }
+
+    val display = imageSizeDisplay(model, size)
+    Surface(
+        modifier = modifier
+            .height(48.dp)
+            .clickable(enabled = enabled, onClick = onClick),
+        shape = RoundedCornerShape(8.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            width = if (selected) 1.5.dp else 1.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+        ),
+        tonalElevation = if (selected) 2.dp else 0.dp,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                display.title,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (display.subtitle.isNotBlank()) {
+                Text(
+                    display.subtitle,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
