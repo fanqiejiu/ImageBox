@@ -207,6 +207,7 @@ private data class ModelInfo(
     val enabled: Boolean,
     val deprecated: Boolean,
     val supportsImageSize: Boolean,
+    val supportsQuality: Boolean = false,
     val endpoint: String = "/v1/draw/nano-banana",
 )
 
@@ -344,6 +345,7 @@ private data class DirectJob(
     val cost: Int,
     val aspectRatio: String,
     val imageSize: String,
+    val imageQuality: String,
     val urls: List<String>,
     val startedAtMs: Long,
     val retries: Int = 0,
@@ -428,6 +430,17 @@ private val API_PLATFORMS = listOf(
 )
 private val DIRECT_ASPECT_RATIOS = listOf("auto", "16:9", "9:16", "1:1", "4:3")
 private val DIRECT_IMAGE_SIZES = listOf("1K", "2K", "4K")
+private val GPT_IMAGE_2_VIP_SIZES = listOf(
+    "auto",
+    "1024x1024",
+    "1536x1024",
+    "1024x1536",
+    "2048x2048",
+    "2048x1152",
+    "3840x2160",
+    "2160x3840",
+)
+private val GPT_IMAGE_2_VIP_QUALITIES = listOf("auto", "low", "medium", "high")
 private val PROMPT_PRESETS = listOf(
     "清透二次元头像，柔和自然光，精致五官，干净背景，高完成度插画",
     "商业产品摄影，干净棚拍光，真实材质，高级灰背景，电商主图构图",
@@ -444,7 +457,31 @@ private val DIRECT_MODELS = listOf(
     ModelInfo("nano-banana", "Nano Banana", 1400, enabled = true, deprecated = false, supportsImageSize = true, endpoint = "/v1/draw/nano-banana"),
     ModelInfo("nano-banana-fast", "Nano Banana Fast", 440, enabled = true, deprecated = false, supportsImageSize = true, endpoint = "/v1/draw/nano-banana"),
     ModelInfo("gpt-image-2", "GPT Image 2", 600, enabled = true, deprecated = false, supportsImageSize = true, endpoint = "/v1/draw/completions"),
+    ModelInfo("gpt-image-2-vip", "GPT Image 2 VIP", 900, enabled = true, deprecated = false, supportsImageSize = true, supportsQuality = true, endpoint = "/v1/api/generate"),
 )
+
+private fun ModelInfo.usesApiGenerate(): Boolean = endpoint == "/v1/api/generate"
+
+private fun imageSizeOptionsFor(model: ModelInfo?): List<String> =
+    if (model?.id == "gpt-image-2-vip") GPT_IMAGE_2_VIP_SIZES else DIRECT_IMAGE_SIZES
+
+private fun defaultImageSizeFor(model: ModelInfo?): String =
+    if (model?.id == "gpt-image-2-vip") "auto" else "4K"
+
+private fun qualityOptionsFor(model: ModelInfo?): List<String> =
+    if (model?.supportsQuality == true) GPT_IMAGE_2_VIP_QUALITIES else emptyList()
+
+private fun defaultImageQualityFor(model: ModelInfo?): String =
+    if (model?.supportsQuality == true) "auto" else ""
+
+private fun imageQualityLabel(quality: String): String =
+    when (quality) {
+        "low" -> "低"
+        "medium" -> "中"
+        "high" -> "高"
+        "auto" -> "自动"
+        else -> quality
+    }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -464,6 +501,7 @@ private fun ImagePlatformApp(
     var selectedModel by rememberSaveable { mutableStateOf("") }
     var aspectRatio by rememberSaveable { mutableStateOf("auto") }
     var imageSize by rememberSaveable { mutableStateOf("4K") }
+    var imageQuality by rememberSaveable { mutableStateOf("auto") }
     var prompt by rememberSaveable { mutableStateOf("") }
     var networkUrls by rememberSaveable { mutableStateOf("") }
     var queueCount by rememberSaveable { mutableStateOf(1) }
@@ -710,8 +748,14 @@ private fun ImagePlatformApp(
         if (selectedModel.isBlank() || selectedModel !in availableModelIds) {
             selectedModel = newState.defaultModel.ifBlank { availableModelIds.firstOrNull().orEmpty() }
         }
+        val currentModel = newState.models.firstOrNull { it.id == selectedModel }
         if (!newState.aspectRatios.contains(aspectRatio)) aspectRatio = newState.aspectRatios.firstOrNull() ?: "auto"
-        if (!newState.imageSizes.contains(imageSize)) imageSize = newState.imageSizes.firstOrNull() ?: "4K"
+        val availableImageSizes = imageSizeOptionsFor(currentModel).ifEmpty { newState.imageSizes }
+        if (imageSize !in availableImageSizes) imageSize = defaultImageSizeFor(currentModel)
+        val availableQualities = qualityOptionsFor(currentModel)
+        if (availableQualities.isNotEmpty() && imageQuality !in availableQualities) {
+            imageQuality = defaultImageQualityFor(currentModel)
+        }
         if (!settingsHydrated) {
             settingsDraft = SettingsDraft.from(newState.settings)
             settingsHydrated = true
@@ -722,6 +766,17 @@ private fun ImagePlatformApp(
         historySeenHydrated = true
         if (saveToAlbum && newItems.isNotEmpty()) {
             newItems.reversed().forEach { saveItemToAlbum(it, automatic = true) }
+        }
+    }
+
+    fun changeSelectedModel(modelId: String) {
+        selectedModel = modelId
+        val nextModel = serverState.models.firstOrNull { it.id == modelId }
+        val availableImageSizes = imageSizeOptionsFor(nextModel)
+        if (imageSize !in availableImageSizes) imageSize = defaultImageSizeFor(nextModel)
+        val availableQualities = qualityOptionsFor(nextModel)
+        imageQuality = if (availableQualities.isEmpty()) "" else {
+            if (imageQuality in availableQualities) imageQuality else defaultImageQualityFor(nextModel)
         }
     }
 
@@ -763,6 +818,7 @@ private fun ImagePlatformApp(
                 val invalidUrls = invalidNetworkUrlCount(networkUrls)
                 if (invalidUrls > 0) error("有 $invalidUrls 个图片链接格式不正确")
                 val urls = localImages.map { it.dataUrl } + parseNetworkUrls(networkUrls)
+                val currentImageQuality = if (currentModel.supportsQuality) imageQuality else ""
                 val taskCost = if (serverState.settings.modelProvider != "custom") currentModel.price else -1
                 val pendingTasks = (1..queueCount).map { index ->
                     QueueTask(
@@ -785,6 +841,7 @@ private fun ImagePlatformApp(
                             prompt = prompt.trim(),
                             aspectRatio = aspectRatio,
                             imageSize = imageSize,
+                            imageQuality = currentImageQuality,
                             urls = urls,
                         )
                         val job = DirectJob(
@@ -796,6 +853,7 @@ private fun ImagePlatformApp(
                             cost = taskCost,
                             aspectRatio = aspectRatio,
                             imageSize = imageSize,
+                            imageQuality = currentImageQuality,
                             urls = urls,
                             startedAtMs = System.currentTimeMillis(),
                         )
@@ -880,7 +938,7 @@ private fun ImagePlatformApp(
     suspend fun pollDirectJobsOnce() {
         val snapshot = directJobs
         snapshot.forEach { job ->
-            val result = runCatching { directClient().result(job.taskId) }.getOrNull() ?: return@forEach
+            val result = runCatching { directClient().result(job.taskId, job.endpoint) }.getOrNull() ?: return@forEach
             if (result.status == "succeeded" && result.finalUrl.isNotBlank()) {
                 directJobs = directJobs.filterNot { it.taskId == job.taskId }
                 val item = ImageItem(
@@ -891,6 +949,7 @@ private fun ImagePlatformApp(
                     modelName = job.modelName,
                     info = listOf(
                         if (job.imageSize.isNotBlank()) job.imageSize else "",
+                        if (job.imageQuality.isNotBlank()) "质量 ${imageQualityLabel(job.imageQuality)}" else "",
                         "${((System.currentTimeMillis() - job.startedAtMs) / 60000.0).formatOne()} 分",
                         "重试 ${job.retries} 次",
                     ).filter { it.isNotBlank() }.joinToString(" | "),
@@ -986,11 +1045,13 @@ private fun ImagePlatformApp(
                     selectedModel = model,
                     selectedModelId = selectedModel,
                     showCreditEstimate = useCreditEstimate,
-                    onModelChange = { selectedModel = it },
+                    onModelChange = ::changeSelectedModel,
                     aspectRatio = aspectRatio,
                     onAspectRatioChange = { aspectRatio = it },
                     imageSize = imageSize,
                     onImageSizeChange = { imageSize = it },
+                    imageQuality = imageQuality,
+                    onImageQualityChange = { imageQuality = it },
                     prompt = prompt,
                     onPromptChange = { prompt = it },
                     onAppendPrompt = { extra ->
@@ -1377,6 +1438,8 @@ private fun CreateScreen(
     onAspectRatioChange: (String) -> Unit,
     imageSize: String,
     onImageSizeChange: (String) -> Unit,
+    imageQuality: String,
+    onImageQualityChange: (String) -> Unit,
     prompt: String,
     onPromptChange: (String) -> Unit,
     onAppendPrompt: (String) -> Unit,
@@ -1415,6 +1478,9 @@ private fun CreateScreen(
             onAddImages(uris.mapNotNull { uri -> readUriAsDataUrl(context, uri) })
         }
     }
+    val selectedUsesApiGenerate = selectedModel?.usesApiGenerate() == true
+    val availableImageSizes = imageSizeOptionsFor(selectedModel).ifEmpty { imageSizes }
+    val qualityOptions = qualityOptionsFor(selectedModel)
     if (showTemplatePage) {
         PromptTemplatePage(
             builtInTemplates = builtInTemplates,
@@ -1458,24 +1524,40 @@ private fun CreateScreen(
                     }
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SectionTitle("比例")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    aspectRatios.forEach { ratio ->
-                        FilterChip(selected = ratio == aspectRatio, onClick = { onAspectRatioChange(ratio) }, label = { Text(ratio) })
+            if (!selectedUsesApiGenerate) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SectionTitle("比例")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        aspectRatios.forEach { ratio ->
+                            FilterChip(selected = ratio == aspectRatio, onClick = { onAspectRatioChange(ratio) }, label = { Text(ratio) })
+                        }
                     }
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionTitle("分辨率")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    imageSizes.forEach { size ->
+                    availableImageSizes.forEach { size ->
                         FilterChip(
                             selected = size == imageSize,
                             enabled = selectedModel?.supportsImageSize != false,
                             onClick = { onImageSizeChange(size) },
                             label = { Text(size) },
                         )
+                    }
+                }
+            }
+            if (qualityOptions.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SectionTitle("质量")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        qualityOptions.forEach { quality ->
+                            FilterChip(
+                                selected = quality == imageQuality,
+                                onClick = { onImageQualityChange(quality) },
+                                label = { Text(imageQualityLabel(quality)) },
+                            )
+                        }
                     }
                 }
             }
@@ -1874,7 +1956,11 @@ private fun ModelOptionCard(
             }
             ModelStatusPill(status)
             Text(
-                if (model.supportsImageSize) "支持分辨率选择" else "自动分辨率",
+                when {
+                    model.supportsQuality -> "支持分辨率与质量选择"
+                    model.supportsImageSize -> "支持分辨率选择"
+                    else -> "自动分辨率"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -3449,18 +3535,33 @@ private class DirectApiClient(
         prompt: String,
         aspectRatio: String,
         imageSize: String,
+        imageQuality: String,
         urls: List<String>,
     ): String = withContext(Dispatchers.IO) {
         val activeKey = generationApiKey()
         if (activeKey.isBlank()) error(if (usingCustomProvider) "缺少自定义 API Key" else "缺少生成 API Key")
         val submitUrl = submitUrl(model)
-        val body = JSONObject()
-            .put("model", model.id)
-            .put("prompt", prompt)
-            .put("aspectRatio", aspectRatio)
-            .put("urls", JSONArray(urls))
-            .put("webHook", "-1")
-        if (model.supportsImageSize) body.put("imageSize", imageSize)
+        val body = if (!usingCustomProvider && model.usesApiGenerate()) {
+            JSONObject()
+                .put("model", model.id)
+                .put("prompt", prompt)
+                .put("images", JSONArray(urls))
+                .put("aspectRatio", imageSize)
+                .put("replyType", "json")
+                .also {
+                    if (model.supportsQuality && imageQuality.isNotBlank()) it.put("quality", imageQuality)
+                }
+        } else {
+            JSONObject()
+                .put("model", model.id)
+                .put("prompt", prompt)
+                .put("aspectRatio", aspectRatio)
+                .put("urls", JSONArray(urls))
+                .put("webHook", "-1")
+                .also {
+                    if (model.supportsImageSize) it.put("imageSize", imageSize)
+                }
+        }
         val json = requestJson(
             url = submitUrl,
             method = "POST",
@@ -3469,23 +3570,35 @@ private class DirectApiClient(
             timeoutMs = 30000,
         )
         val data = json.optJSONObject("data")
-        if (json.opt("code")?.toString() in listOf("0", null) && data?.optString("id").orEmpty().isNotBlank()) {
-            data!!.optString("id")
+        val taskId = data?.optString("id").orEmpty().ifBlank { json.optString("id") }
+        if (json.opt("code")?.toString() in listOf("0", null) && taskId.isNotBlank()) {
+            taskId
         } else {
             error(json.optString("msg", "API 提交失败: $json"))
         }
     }
 
-    suspend fun result(taskId: String): DirectResult = withContext(Dispatchers.IO) {
+    suspend fun result(taskId: String, endpoint: String): DirectResult = withContext(Dispatchers.IO) {
         val activeKey = generationApiKey()
         if (activeKey.isBlank()) error(if (usingCustomProvider) "缺少自定义 API Key" else "缺少生成 API Key")
-        val json = requestJson(
-            url = resultUrl(),
-            method = "POST",
-            body = JSONObject().put("id", taskId),
-            bearer = activeKey,
-            timeoutMs = 12000,
-        )
+        val usesApiGenerateResult = !usingCustomProvider && endpoint == "/v1/api/generate"
+        val json = if (usesApiGenerateResult) {
+            requestJson(
+                url = apiGenerateResultUrl(taskId),
+                method = "GET",
+                body = null,
+                bearer = activeKey,
+                timeoutMs = 12000,
+            )
+        } else {
+            requestJson(
+                url = resultUrl(),
+                method = "POST",
+                body = JSONObject().put("id", taskId),
+                bearer = activeKey,
+                timeoutMs = 12000,
+            )
+        }
         val data = json.optJSONObject("data") ?: json
         val results = data.optJSONArray("results")
         DirectResult(
@@ -3610,6 +3723,11 @@ private class DirectApiClient(
             }.getOrDefault(submitUrl.trimEnd('/'))
         }
         return "$base/v1/draw/result"
+    }
+
+    private fun apiGenerateResultUrl(taskId: String): String {
+        val encoded = URLEncoder.encode(taskId, "UTF-8")
+        return "$apiHost/v1/api/result?id=$encoded"
     }
 
     private fun llmChatUrl(): String {
