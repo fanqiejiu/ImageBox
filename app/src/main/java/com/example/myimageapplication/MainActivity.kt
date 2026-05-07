@@ -352,10 +352,16 @@ private data class DirectJob(
 )
 
 private data class DirectResult(
+    val taskId: String = "",
     val status: String,
     val progress: Double,
     val finalUrl: String = "",
     val failureReason: String = "",
+)
+
+private data class DirectSubmission(
+    val taskId: String,
+    val immediateResult: DirectResult? = null,
 )
 
 private const val DEFAULT_API_HOST = "https://grsai.dakka.com.cn"
@@ -721,6 +727,23 @@ private fun ImagePlatformApp(
     fun itemKey(item: ImageItem): String =
         item.displayUrl.ifBlank { item.filename.ifBlank { item.taskId } }
 
+    fun buildImageItem(job: DirectJob, result: DirectResult): ImageItem =
+        ImageItem(
+            displayUrl = result.finalUrl,
+            filename = buildResultFileName(job.modelName, job.taskId),
+            prompt = job.prompt,
+            model = job.model,
+            modelName = job.modelName,
+            info = listOf(
+                if (job.imageSize.isNotBlank()) job.imageSize else "",
+                if (job.imageQuality.isNotBlank()) "质量 ${imageQualityLabel(job.imageQuality)}" else "",
+                "${((System.currentTimeMillis() - job.startedAtMs) / 60000.0).formatOne()} 分",
+                "重试 ${job.retries} 次",
+            ).filter { it.isNotBlank() }.joinToString(" | "),
+            createdAt = nowText(),
+            taskId = job.taskId,
+        )
+
     fun saveItemToAlbum(item: ImageItem, automatic: Boolean = false) {
         scope.launch {
             if (!hasAlbumWritePermission(context)) {
@@ -857,8 +880,14 @@ private fun ImagePlatformApp(
 
                 pendingTasks.forEach { pending ->
                     try {
-                        applyDirectState(serverState.copy(pending = serverState.pending.filterNot { it.id == pending.id }))
-                        val taskId = directClient().submitImage(
+                        applyDirectState(
+                            serverState.copy(
+                                pending = serverState.pending.filterNot { it.id == pending.id },
+                                active = serverState.active + ActiveTask(pending.id, pending.prompt, pending.modelName, "提交中", 0.0),
+                            )
+                        )
+                        val startedAtMs = System.currentTimeMillis()
+                        val submission = directClient().submitImage(
                             model = currentModel,
                             prompt = prompt.trim(),
                             aspectRatio = aspectRatio,
@@ -866,6 +895,7 @@ private fun ImagePlatformApp(
                             imageQuality = currentImageQuality,
                             urls = urls,
                         )
+                        val taskId = submission.taskId.ifBlank { pending.id }
                         val job = DirectJob(
                             taskId = taskId,
                             prompt = prompt.trim(),
@@ -877,19 +907,44 @@ private fun ImagePlatformApp(
                             imageSize = imageSize,
                             imageQuality = currentImageQuality,
                             urls = urls,
-                            startedAtMs = System.currentTimeMillis(),
+                            startedAtMs = startedAtMs,
                         )
-                        directJobs = directJobs + job
-                        applyDirectState(
-                            serverState.copy(
-                                active = serverState.active + ActiveTask(taskId, prompt.trim(), currentModel.name, "submitted", 0.0),
+                        val immediateResult = submission.immediateResult
+                        if (immediateResult?.status == "succeeded" && immediateResult.finalUrl.isNotBlank()) {
+                            val item = buildImageItem(job, immediateResult)
+                            applyDirectState(
+                                serverState.copy(
+                                    active = serverState.active.filterNot { it.id == pending.id },
+                                    history = (listOf(item) + serverState.history).distinctBy { it.displayUrl }.take(120),
+                                    totalCount = serverState.totalCount + 1,
+                                )
                             )
-                        )
+                        } else {
+                            directJobs = directJobs + job
+                            applyDirectState(
+                                serverState.copy(
+                                    active = serverState.active.map {
+                                        if (it.id == pending.id) it.copy(id = taskId, status = "submitted", progress = 0.0) else it
+                                    },
+                                )
+                            )
+                        }
                     } catch (error: Exception) {
-                        val failed = FailedTask(pending.id, prompt.trim(), error.message ?: "提交失败", nowText("HH:mm:ss"))
+                        val reason = error.message ?: "提交失败"
+                        val failed = FailedTask(
+                            pending.id,
+                            prompt.trim(),
+                            if (currentModel.usesApiGenerate() && reason.contains("timeout", ignoreCase = true)) {
+                                "提交超时，云端可能仍在生成；本次没有返回任务 ID，客户端无法继续查询。$reason"
+                            } else {
+                                reason
+                            },
+                            nowText("HH:mm:ss"),
+                        )
                         applyDirectState(
                             serverState.copy(
                                 pending = serverState.pending.filterNot { it.id == pending.id },
+                                active = serverState.active.filterNot { it.id == pending.id },
                                 failed = listOf(failed) + serverState.failed,
                             )
                         )
@@ -960,24 +1015,19 @@ private fun ImagePlatformApp(
     suspend fun pollDirectJobsOnce() {
         val snapshot = directJobs
         snapshot.forEach { job ->
-            val result = runCatching { directClient().result(job.taskId, job.endpoint) }.getOrNull() ?: return@forEach
+            val result = runCatching { directClient().result(job.taskId, job.endpoint) }.getOrElse { error ->
+                applyDirectState(
+                    serverState.copy(
+                        active = serverState.active.map {
+                            if (it.id == job.taskId) it.copy(status = "查询重试中：${error.message ?: "结果接口异常"}") else it
+                        },
+                    )
+                )
+                return@forEach
+            }
             if (result.status == "succeeded" && result.finalUrl.isNotBlank()) {
                 directJobs = directJobs.filterNot { it.taskId == job.taskId }
-                val item = ImageItem(
-                    displayUrl = result.finalUrl,
-                    filename = buildResultFileName(job.modelName, job.taskId),
-                    prompt = job.prompt,
-                    model = job.model,
-                    modelName = job.modelName,
-                    info = listOf(
-                        if (job.imageSize.isNotBlank()) job.imageSize else "",
-                        if (job.imageQuality.isNotBlank()) "质量 ${imageQualityLabel(job.imageQuality)}" else "",
-                        "${((System.currentTimeMillis() - job.startedAtMs) / 60000.0).formatOne()} 分",
-                        "重试 ${job.retries} 次",
-                    ).filter { it.isNotBlank() }.joinToString(" | "),
-                    createdAt = nowText(),
-                    taskId = job.taskId,
-                )
+                val item = buildImageItem(job, result)
                 applyDirectState(
                     serverState.copy(
                         active = serverState.active.filterNot { it.id == job.taskId },
@@ -3639,10 +3689,11 @@ private class DirectApiClient(
         imageSize: String,
         imageQuality: String,
         urls: List<String>,
-    ): String = withContext(Dispatchers.IO) {
+    ): DirectSubmission = withContext(Dispatchers.IO) {
         val activeKey = generationApiKey()
         if (activeKey.isBlank()) error(if (usingCustomProvider) "缺少自定义 API Key" else "缺少生成 API Key")
         val submitUrl = submitUrl(model)
+        val usesApiGenerate = !usingCustomProvider && model.usesApiGenerate()
         val body = if (!usingCustomProvider && model.usesApiGenerate()) {
             JSONObject()
                 .put("model", model.id)
@@ -3669,12 +3720,15 @@ private class DirectApiClient(
             method = "POST",
             body = body,
             bearer = activeKey,
-            timeoutMs = 30000,
+            timeoutMs = if (usesApiGenerate) 180000 else 30000,
         )
-        val data = json.optJSONObject("data")
-        val taskId = data?.optString("id").orEmpty().ifBlank { json.optString("id") }
+        val result = parseDirectResult(json)
+        val returnedTaskId = result.taskId.ifBlank { json.optJSONObject("data")?.optString("id").orEmpty().ifBlank { json.optString("id") } }
+        val taskId = returnedTaskId.ifBlank {
+            if (result.status == "succeeded" && result.finalUrl.isNotBlank()) "direct-${UUID.randomUUID()}" else ""
+        }
         if (json.opt("code")?.toString() in listOf("0", null) && taskId.isNotBlank()) {
-            taskId
+            DirectSubmission(taskId = taskId, immediateResult = result.takeIf { it.status == "succeeded" && it.finalUrl.isNotBlank() })
         } else {
             error(json.optString("msg", "API 提交失败: $json"))
         }
@@ -3690,7 +3744,7 @@ private class DirectApiClient(
                 method = "GET",
                 body = null,
                 bearer = activeKey,
-                timeoutMs = 12000,
+                timeoutMs = 30000,
             )
         } else {
             requestJson(
@@ -3701,15 +3755,85 @@ private class DirectApiClient(
                 timeoutMs = 12000,
             )
         }
+        parseDirectResult(json)
+    }
+
+    private fun parseDirectResult(json: JSONObject): DirectResult {
         val data = json.optJSONObject("data") ?: json
-        val results = data.optJSONArray("results")
-        DirectResult(
-            status = data.optString("status", json.optString("status", "submitted")),
-            progress = data.optDouble("progress", 0.0),
-            finalUrl = results?.optJSONObject(0)?.optString("url").orEmpty(),
-            failureReason = data.optString("failure_reason", json.optString("msg")),
+        val finalUrl = extractImageUrl(data).ifBlank { extractImageUrl(json) }
+        val rawStatus = firstNonBlank(
+            data.optString("status"),
+            data.optString("state"),
+            json.optString("status"),
+            json.optString("state"),
+            if (finalUrl.isNotBlank()) "succeeded" else "",
+        )
+        val status = normalizeTaskStatus(rawStatus, finalUrl)
+        val progress = when (status) {
+            "succeeded" -> 100.0
+            else -> data.optDouble("progress", json.optDouble("progress", 0.0))
+        }
+        val failureReason = firstNonBlank(
+            data.optString("failure_reason"),
+            data.optString("error"),
+            data.optString("message"),
+            json.optString("msg"),
+            json.optString("error"),
+            json.optString("message"),
+        )
+        return DirectResult(
+            taskId = firstNonBlank(data.optString("id"), data.optString("taskId"), data.optString("task_id"), json.optString("id")),
+            status = status,
+            progress = progress,
+            finalUrl = finalUrl,
+            failureReason = failureReason,
         )
     }
+
+    private fun normalizeTaskStatus(rawStatus: String, finalUrl: String): String {
+        val normalized = rawStatus.trim().lowercase(Locale.US)
+        if (normalized.isBlank()) return if (finalUrl.isNotBlank()) "succeeded" else "submitted"
+        return when (normalized) {
+            "success", "succeeded", "complete", "completed", "done", "finish", "finished" -> "succeeded"
+            "fail", "failed", "error", "timeout", "cancelled", "canceled" -> "failed"
+            else -> normalized
+        }
+    }
+
+    private fun extractImageUrl(value: Any?): String {
+        return when (value) {
+            is JSONObject -> {
+                listOf("url", "image_url", "imageUrl", "finalUrl", "display_url").forEach { key ->
+                    val text = value.optString(key).trim()
+                    if (isImageReference(text)) return text
+                }
+                val b64 = value.optString("b64_json").trim()
+                if (b64.isNotBlank()) {
+                    return if (b64.startsWith("data:")) b64 else "data:image/png;base64,$b64"
+                }
+                listOf("results", "images", "image", "output", "outputs", "result", "data").forEach { key ->
+                    val found = extractImageUrl(value.opt(key))
+                    if (found.isNotBlank()) return found
+                }
+                ""
+            }
+            is JSONArray -> {
+                for (index in 0 until value.length()) {
+                    val found = extractImageUrl(value.opt(index))
+                    if (found.isNotBlank()) return found
+                }
+                ""
+            }
+            is String -> value.trim().takeIf(::isImageReference).orEmpty()
+            else -> ""
+        }
+    }
+
+    private fun isImageReference(value: String): Boolean =
+        value.startsWith("http://") || value.startsWith("https://") || value.startsWith("data:")
+
+    private fun firstNonBlank(vararg values: String): String =
+        values.firstOrNull { it.isNotBlank() }.orEmpty()
 
     suspend fun refreshCredits(): CreditsInfo = withContext(Dispatchers.IO) {
         val useToken = creditQueryMode == "token"
@@ -3859,7 +3983,11 @@ private class DirectApiClient(
         }
         val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
         val text = stream?.let { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).use { reader -> reader.readText() } }.orEmpty()
-        val json = if (text.isBlank()) JSONObject() else JSONObject(text)
+        val json = runCatching {
+            if (text.isBlank()) JSONObject() else JSONObject(text)
+        }.getOrElse {
+            JSONObject().put("msg", text.ifBlank { "HTTP ${connection.responseCode}" })
+        }
         if (connection.responseCode !in 200..299) error(json.optString("msg", "HTTP ${connection.responseCode}"))
         return json
     }
